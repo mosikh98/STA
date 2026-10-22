@@ -9,6 +9,8 @@ import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.text.InputType
 import android.view.View
@@ -25,6 +27,7 @@ class MainActivity : Activity() {
     private lateinit var mode: Spinner
     private lateinit var status: TextView
     private var cur = Store.GEMINI
+    private val ui = Handler(Looper.getMainLooper())
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -148,15 +151,32 @@ class MainActivity : Activity() {
         )
     }
 
+    private fun errText(t: Throwable): String =
+        if (t is java.io.InterruptedIOException)
+            "زمان انتظار تمام شد؛ سرور پاسخ نداد (آدرس، اینترنت/VPN یا نام مدل را بررسی کنید)"
+        else "${t.javaClass.simpleName}: ${t.message ?: ""}"
+
     private fun testConnection() {
         val cfg = current()
-        status.text = "در حال تست…"
+        val t0 = System.currentTimeMillis()
+        var running = true
+        val tick = object : Runnable {
+            override fun run() {
+                if (running) {
+                    status.text = "در حال تست… ${(System.currentTimeMillis() - t0) / 1000} ثانیه"
+                    ui.postDelayed(this, 1000)
+                }
+            }
+        }
+        ui.post(tick)
         Thread {
             val r = Api.test(cfg)
             runOnUiThread {
+                running = false
+                ui.removeCallbacks(tick)
                 status.text = r.fold(
                     { "اتصال موفق ✓  (پاسخ: $it)" },
-                    { "خطا ✗  ${it.message}" }
+                    { "خطا ✗  ${errText(it)}" }
                 )
             }
         }.start()
@@ -177,7 +197,7 @@ class MainActivity : Activity() {
                         status.text = "${list.size} مدل برای این کلید پیدا شد"
                         showModels(list)
                     }
-                }.onFailure { status.text = "خطا ✗  ${it.message}" }
+                }.onFailure { status.text = "خطا ✗  ${errText(it)}" }
             }
         }.start()
     }

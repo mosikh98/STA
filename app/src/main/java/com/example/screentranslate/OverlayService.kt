@@ -44,6 +44,7 @@ class OverlayService : Service() {
     private var rh = 0
     private var fab: TextView? = null
     private var fabLp: WindowManager.LayoutParams? = null
+    private var menu: View? = null
     private var panel: View? = null
     private var overlay: View? = null
     private var pending = false
@@ -124,6 +125,8 @@ class OverlayService : Service() {
         PixelFormat.TRANSLUCENT
     )
 
+    // ---------------------------------------------------------------- floating button + menu
+
     private fun showFab() {
         val size = (56 * resources.displayMetrics.density).toInt()
         val lp = overlayParams(size, size).apply { gravity = Gravity.TOP or Gravity.START; x = 20; y = 400 }
@@ -137,10 +140,11 @@ class OverlayService : Service() {
                 MotionEvent.ACTION_DOWN -> { sx = lp.x; sy = lp.y; tx = e.rawX; ty = e.rawY; moved = false; true }
                 MotionEvent.ACTION_MOVE -> {
                     val dx = (e.rawX - tx).toInt(); val dy = (e.rawY - ty).toInt()
-                    if (abs(dx) > 10 || abs(dy) > 10) moved = true
-                    lp.x = sx + dx; lp.y = sy + dy; wm.updateViewLayout(v, lp); true
+                    if (!moved && (abs(dx) > 10 || abs(dy) > 10)) { moved = true; hideMenu() }
+                    if (moved) { lp.x = sx + dx; lp.y = sy + dy; wm.updateViewLayout(v, lp) }
+                    true
                 }
-                MotionEvent.ACTION_UP -> { if (!moved) onTap(); true }
+                MotionEvent.ACTION_UP -> { if (!moved) toggleMenu(); true }
                 else -> false
             }
         }
@@ -148,16 +152,73 @@ class OverlayService : Service() {
         fab = tv; fabLp = lp
     }
 
-    private fun onTap() {
+    private fun toggleMenu() { if (menu != null) hideMenu() else showMenu() }
+
+    private fun hideMenu() {
+        menu?.let { runCatching { wm.removeView(it) } }
+        menu = null
+    }
+
+    /** Popup next to the floating button: translate / clear / stop. */
+    private fun showMenu() {
         if (busy) return
-        if (overlay != null) { removeOverlay(); return }   // second tap clears the translation
-        hidePanel()
+        val d = resources.displayMetrics.density
+        val itemH = (48 * d).toInt()
+        val menuW = (160 * d).toInt()
+        val entries: List<Pair<String, () -> Unit>> = listOf(
+            "ترجمه صفحه" to { menuTranslate() },
+            "پاک کردن ترجمه" to { menuClear() },
+            "توقف" to { stopSelf() }
+        )
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutDirection = View.LAYOUT_DIRECTION_RTL
+            background = GradientDrawable().apply { cornerRadius = 16 * d; setColor(0xF0202020.toInt()) }
+            for ((label, action) in entries) {
+                addView(TextView(context).apply {
+                    text = label; textSize = 15f; setTextColor(Color.WHITE)
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding((16 * d).toInt(), 0, (16 * d).toInt(), 0)
+                    layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, itemH)
+                    setOnClickListener { hideMenu(); action() }
+                })
+            }
+            setOnTouchListener { _, e ->
+                if (e.action == MotionEvent.ACTION_OUTSIDE) { hideMenu(); true } else false
+            }
+        }
+        val f = fabLp ?: return
+        val menuH = itemH * entries.size
+        val dm = realMetrics()
+        val mx = f.x.coerceIn(0, (dm.widthPixels - menuW).coerceAtLeast(0))
+        val above = f.y - menuH - (8 * d).toInt()
+        val my = if (above >= 0) above else f.y + f.height + (8 * d).toInt()
+        val lp = overlayParams(menuW, menuH, WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = mx; y = my
+        }
+        wm.addView(box, lp)
+        menu = box
+    }
+
+    private fun menuClear() { removeOverlay(); hidePanel() }
+
+    private fun menuTranslate() {
+        if (busy) return
         if (Store.load(this).key.isBlank()) {
             Toast.makeText(this, "ابتدا API Key را در تنظیمات وارد کنید", Toast.LENGTH_LONG).show()
             return
         }
         busy = true
-        // follow screen rotation (e.g. user started the app in portrait, game is landscape)
+        removeOverlay(); hidePanel()
+        // small delay so the menu / old translation are gone before the screenshot
+        main.postDelayed({ startCapture() }, 250)
+    }
+
+    // ---------------------------------------------------------------- capture + translate
+
+    private fun startCapture() {
+        // follow screen rotation (e.g. app started in portrait, game is landscape)
         val dm = realMetrics()
         if (dm.widthPixels != rw || dm.heightPixels != rh) {
             rw = dm.widthPixels; rh = dm.heightPixels
@@ -239,16 +300,14 @@ class OverlayService : Service() {
         wm.addView(v, lp)
         overlay = v
         fab?.let { f ->
-            wm.removeView(f)          // re-add so the button stays above the overlay
+            wm.removeView(f)          // re-add so the button stays above the translation
             wm.addView(f, fabLp)
-            f.text = "پاک"
         }
     }
 
     private fun removeOverlay() {
         overlay?.let { runCatching { wm.removeView(it) } }
         overlay = null
-        fab?.text = "ترجمه"
     }
 
     /** Fallback: plain text panel (panel mode, errors, unparseable replies). */
@@ -284,8 +343,9 @@ class OverlayService : Service() {
 
     override fun onDestroy() {
         main.removeCallbacks(timeout)
+        hideMenu()
         hidePanel()
-        overlay?.let { runCatching { wm.removeView(it) } }
+        removeOverlay()
         fab?.let { runCatching { wm.removeView(it) } }
         display?.release(); reader?.close(); projection?.stop()
         super.onDestroy()

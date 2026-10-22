@@ -16,18 +16,21 @@ object Api {
         .readTimeout(120, TimeUnit.SECONDS)
         .build()
 
+    /** Same client but with a hard 30s limit for the whole call (used by test / model list). */
+    private val fast = http.newBuilder().callTimeout(30, TimeUnit.SECONDS).build()
+
     private fun endpoint(u: String): String {
         val t = u.trim().trimEnd('/')
         return if (t.endsWith("/chat/completions")) t else "$t/chat/completions"
     }
 
-    private fun post(cfg: Cfg, body: JSONObject): String {
+    private fun post(cfg: Cfg, body: JSONObject, client: OkHttpClient = http): String {
         val req = Request.Builder()
             .url(endpoint(cfg.url))
             .header("Authorization", "Bearer ${cfg.key.trim()}")
             .post(body.toString().toRequestBody("application/json".toMediaType()))
             .build()
-        http.newCall(req).execute().use { r ->
+        client.newCall(req).execute().use { r ->
             val txt = r.body?.string().orEmpty()
             if (!r.isSuccessful) throw IOException("HTTP ${r.code}: ${txt.take(300)}")
             return JSONObject(txt).getJSONArray("choices").getJSONObject(0)
@@ -41,7 +44,7 @@ object Api {
             .put("max_tokens", 5)
             .put("messages", JSONArray().put(
                 JSONObject().put("role", "user").put("content", "Reply with OK")))
-        post(cfg, body)
+        post(cfg, body, fast)
     }
 
     /** w,h = size of the image being sent (needed for pixel-coordinate mode). */
@@ -84,7 +87,7 @@ object Api {
             .header("Authorization", "Bearer ${cfg.key.trim()}")
             .get()
             .build()
-        http.newCall(req).execute().use { r ->
+        fast.newCall(req).execute().use { r ->
             val txt = r.body?.string().orEmpty()
             if (!r.isSuccessful) throw IOException("HTTP ${r.code}: ${txt.take(300)}")
             val arr = JSONObject(txt).getJSONArray("data")

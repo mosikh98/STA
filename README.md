@@ -14,4 +14,4 @@ translated text drawn over the original text (like Google Translate's screen ove
 2. Pick the box-format that matches your model (Gemini: first option, Qwen-VL: third option).
    If the model can't give coordinates, choose "text panel only".
 3. "شروع ترجمه روی صفحه" -> grant overlay + screen-capture permissions.
-4. Tap the floating button: translation appears in place. Tap again ("پاک") to clear.
+4. Tap the floating button -> menu: translate page / clear translation / stop.
