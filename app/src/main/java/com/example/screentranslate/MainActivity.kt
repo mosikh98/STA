@@ -64,9 +64,10 @@ class MainActivity : Activity() {
         methodSp = spinner(
             listOf(
                 "سریع: OCR روی گوشی + ترجمه متن با API (توصیه‌شده)",
-                "مدل بینایی: عکس مستقیم به مدل (کندتر)"
+                "مدل بینایی: عکس مستقیم به مدل (کندتر)",
+                "آفلاین: همه‌چیز روی گوشی، بدون API (کیفیت کمتر)"
             ),
-            Store.methodIdx(this).coerceIn(0, 1)
+            Store.methodIdx(this).coerceIn(0, 2)
         )
         root.addView(methodSp)
 

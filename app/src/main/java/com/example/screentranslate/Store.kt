@@ -13,7 +13,7 @@ data class Cfg(
     val effort: String? = null,  // reasoning_effort sent with translation requests (null = not sent)
     val imgWidth: Int = 1024,    // width of the screenshot sent to the model (vision method)
     val opaque: Boolean = true,  // fully opaque labels
-    val method: Int = 1,         // 0 = vision model reads the image, 1 = on-phone OCR + text translation
+    val method: Int = 1,         // 0 = vision model reads the image, 1 = on-phone OCR + API text translation, 2 = fully offline
     val ocrScript: Int = 0       // 0 Chinese+Latin, 1 Latin, 2 Japanese+Latin, 3 Korean+Latin
 )
 
@@ -82,7 +82,7 @@ object Store {
             s.getString("extra", "")!!,
             s.getInt("boxMode", 0),
             effort, imgW, opaque(c),
-            methodIdx(c).coerceIn(0, 1), ocrIdx(c).coerceIn(0, 3)
+            methodIdx(c).coerceIn(0, 2), ocrIdx(c).coerceIn(0, 3)
         )
     }
 }

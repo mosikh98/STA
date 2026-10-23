@@ -23,3 +23,4 @@ translated text drawn over the original text (like Google Translate's screen ove
 ## Methods
 - Fast (default): ML Kit OCR on the phone finds text + boxes, only the text goes to your API.
 - Vision model: whole screenshot goes to the model (slower, compact line output, streamed).
+- Offline: ML Kit OCR + ML Kit on-device translation (no API key; language models download once).

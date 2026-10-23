@@ -217,7 +217,8 @@ class OverlayService : Service() {
     }
 
     private fun menuTranslate() {
-        if (Store.load(this).key.isBlank()) {
+        val c = Store.load(this)
+        if (c.method != 2 && c.key.isBlank()) {
             Toast.makeText(this, "ابتدا API Key را در تنظیمات وارد کنید", Toast.LENGTH_LONG).show()
             return
         }
@@ -270,7 +271,11 @@ class OverlayService : Service() {
         val g = gen
         fab?.text = "…"
         Thread {
-            if (cfg.method == 1) runOcr(cfg, bmp, g) else runVision(cfg, bmp, g)
+            when (cfg.method) {
+                1 -> runOcr(cfg, bmp, g)
+                2 -> runOffline(cfg, bmp, g)
+                else -> runVision(cfg, bmp, g)
+            }
         }.start()
     }
 
@@ -302,30 +307,36 @@ class OverlayService : Service() {
         }
     }
 
-    /** Fast method: ML Kit OCR on the phone (boxes), then only the text goes to the API. */
-    private fun runOcr(cfg: Cfg, bmp: Bitmap, g: Int) {
+    /** Runs OCR; returns null when the pipeline already ended (error / nothing found / cancelled). */
+    private fun ocrBlocks(cfg: Cfg, bmp: Bitmap, g: Int): List<OcrBlock>? {
         val blocks = try {
             Ocr.recognize(bmp, cfg.ocrScript)
         } catch (e: Throwable) {
             fail(g, "خطای OCR: ${e.message}")
-            return
+            return null
         }
-        if (g != gen) return
-        if (blocks.isEmpty()) { finish(g, cfg, Result.success(""), 0); return }
+        if (g != gen) return null
+        if (blocks.isEmpty()) { finish(g, cfg, Result.success(""), 0); return null }
+        return blocks
+    }
+
+    /** Fast method: ML Kit OCR on the phone (boxes), then only the text goes to the API. */
+    private fun runOcr(cfg: Cfg, bmp: Bitmap, g: Int) {
+        val blocks = ocrBlocks(cfg, bmp, g) ?: return
 
         val numbered = StringBuilder()
         blocks.forEachIndexed { i, b -> numbered.append(i + 1).append('|').append(b.text).append('\n') }
 
         val ls = LineStream()
         val count = AtomicInteger(0)
-        val re = Regex("^\\s*(\\d+)\\s*\\|\\s*(.+)\$")
 
         fun handle(line: String) {
-            val m = re.find(line) ?: return
-            val idx = m.groupValues[1].toIntOrNull() ?: return
-            val b = blocks.getOrNull(idx - 1) ?: return
-            val t = m.groupValues[2].trim()
+            val bar = line.indexOf('|')
+            if (bar < 0) return
+            val idx = Overlay.ascii(line.substring(0, bar)).trim().toIntOrNull() ?: return
+            val t = line.substring(bar + 1).trim()
             if (t.isEmpty()) return
+            val b = blocks.getOrNull(idx - 1) ?: return
             count.incrementAndGet()
             val base = Item(t, b.l, b.t, b.r, b.b)
             val item = base.copy(color = Overlay.sample(bmp, base))
@@ -333,9 +344,31 @@ class OverlayService : Service() {
         }
 
         val r = Api.translateText(cfg, numbered.toString(), { g != gen }) { delta ->
-            for (ln in ls.feed(delta)) handle(ln)
+            for (ln in ls.feed(delta)) runCatching { handle(ln) }
         }
-        ls.flush()?.let { handle(it) }
+        ls.flush()?.let { runCatching { handle(it) } }
+        finish(g, cfg, r, count.get())
+    }
+
+    /** Offline method: OCR + ML Kit on-device translation. No API, no key. */
+    private fun runOffline(cfg: Cfg, bmp: Bitmap, g: Int) {
+        val blocks = ocrBlocks(cfg, bmp, g) ?: return
+        val count = AtomicInteger(0)
+        val r: Result<String> = try {
+            Offline.translate(
+                cfg.lang, blocks, { g != gen },
+                { msg -> main.post { if (g == gen) Toast.makeText(this, msg, Toast.LENGTH_LONG).show() } }
+            ) { idx, text ->
+                val b = blocks[idx]
+                count.incrementAndGet()
+                val base = Item(text, b.l, b.t, b.r, b.b)
+                val item = base.copy(color = Overlay.sample(bmp, base))
+                main.post { if (g == gen) addItem(item, cfg.opaque) }
+            }
+            Result.success("")
+        } catch (e: Throwable) {
+            Result.failure(e)
+        }
         finish(g, cfg, r, count.get())
     }
 
@@ -367,10 +400,10 @@ class OverlayService : Service() {
                 val t = acc.toString()
                 main.post { if (g == gen) updatePanel(t) }
             } else {
-                for (ln in ls.feed(delta)) handle(ln)
+                for (ln in ls.feed(delta)) runCatching { handle(ln) }
             }
         }
-        if (cfg.boxMode != 3) ls.flush()?.let { handle(it) }
+        if (cfg.boxMode != 3) ls.flush()?.let { runCatching { handle(it) } }
         finish(g, cfg, r, count.get())
     }
 

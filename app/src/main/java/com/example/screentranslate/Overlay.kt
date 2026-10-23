@@ -41,16 +41,36 @@ class LineStream {
 }
 
 object Overlay {
+    /** Persian / Arabic-Indic digits and separators -> ASCII (models sometimes answer in Persian digits). */
+    fun ascii(s: String): String {
+        val sb = StringBuilder(s.length)
+        for (ch in s) {
+            sb.append(
+                when (ch) {
+                    in '\u0660'..'\u0669' -> '0' + (ch - '\u0660')
+                    in '\u06F0'..'\u06F9' -> '0' + (ch - '\u06F0')
+                    '\u066B' -> '.'
+                    '\u060C' -> ','
+                    else -> ch
+                }
+            )
+        }
+        return sb.toString()
+    }
+
     private val boxRe = Regex(
-        """^\s*\[?\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\]?\s*\|\s*(.+?)\s*$"""
+        """^\s*\[?\s*(-?[0-9]+(?:\.[0-9]+)?)\s*,\s*(-?[0-9]+(?:\.[0-9]+)?)\s*,\s*(-?[0-9]+(?:\.[0-9]+)?)\s*,\s*(-?[0-9]+(?:\.[0-9]+)?)\s*\]?\s*$"""
     )
 
     /** One line "a,b,c,d|translation" -> Item (null if the line is not in that form). */
     fun parseBoxLine(line: String, mode: Int, sw: Int, sh: Int): Item? {
-        val m = boxRe.find(line) ?: return null
-        val v = DoubleArray(4) { m.groupValues[it + 1].toDouble() }
-        val text = m.groupValues[5].trim()
+        val bar = line.indexOf('|')
+        if (bar < 0) return null
+        val m = boxRe.find(ascii(line.substring(0, bar))) ?: return null
+        val text = line.substring(bar + 1).trim()
         if (text.isEmpty()) return null
+        val v = DoubleArray(4)
+        for (k in 0..3) v[k] = m.groupValues[k + 1].toDoubleOrNull() ?: return null
         val q = when (mode) {
             0 -> listOf(v[1] / 1000, v[0] / 1000, v[3] / 1000, v[2] / 1000)
             1 -> listOf(v[0] / 1000, v[1] / 1000, v[2] / 1000, v[3] / 1000)
