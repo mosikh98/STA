@@ -16,21 +16,23 @@ object Api {
         .readTimeout(120, TimeUnit.SECONDS)
         .build()
 
-    /** Same client but with a hard 30s limit for the whole call (used by test / model list). */
-    private val fast = http.newBuilder().callTimeout(30, TimeUnit.SECONDS).build()
+    /** Same client but with a hard limit for the whole call (used by test / model list). */
+    private val fast = http.newBuilder().callTimeout(90, TimeUnit.SECONDS).build()
 
     private fun endpoint(u: String): String {
         val t = u.trim().trimEnd('/')
         return if (t.endsWith("/chat/completions")) t else "$t/chat/completions"
     }
 
-    private fun post(cfg: Cfg, body: JSONObject, client: OkHttpClient = http): String {
-        val req = Request.Builder()
+    private fun buildReq(cfg: Cfg, body: JSONObject): Request =
+        Request.Builder()
             .url(endpoint(cfg.url))
             .header("Authorization", "Bearer ${cfg.key.trim()}")
             .post(body.toString().toRequestBody("application/json".toMediaType()))
             .build()
-        client.newCall(req).execute().use { r ->
+
+    private fun post(cfg: Cfg, body: JSONObject, client: OkHttpClient = http): String {
+        client.newCall(buildReq(cfg, body)).execute().use { r ->
             val txt = r.body?.string().orEmpty()
             if (!r.isSuccessful) throw IOException("HTTP ${r.code}: ${txt.take(300)}")
             return JSONObject(txt).getJSONArray("choices").getJSONObject(0)
@@ -47,8 +49,15 @@ object Api {
         post(cfg, body, fast)
     }
 
-    /** w,h = size of the image being sent (needed for pixel-coordinate mode). */
-    fun translate(cfg: Cfg, jpegBase64: String, w: Int, h: Int): Result<String> = runCatching {
+    /**
+     * Streams the translation. onDelta receives text chunks as they arrive, so the UI can
+     * show results before the model has finished. isCancelled is polled while reading.
+     * Returns the full text. Retries a few times on 503/429 if nothing was received yet.
+     */
+    fun translate(
+        cfg: Cfg, jpegBase64: String, w: Int, h: Int,
+        isCancelled: () -> Boolean, onDelta: (String) -> Unit
+    ): Result<String> = runCatching {
         val extra = if (cfg.extra.isNotBlank()) "\nExtra instructions: ${cfg.extra}" else ""
         val system = if (cfg.boxMode == 3) {
             "You are a screen translator. Read all visible text in the screenshot and translate it " +
@@ -72,10 +81,66 @@ object Api {
                 JSONObject().put("url", "data:image/jpeg;base64,$jpegBase64")))
         val body = JSONObject()
             .put("model", cfg.model)
+            .put("stream", true)
             .put("messages", JSONArray()
                 .put(JSONObject().put("role", "system").put("content", system))
                 .put(JSONObject().put("role", "user").put("content", content)))
-        post(cfg, body)
+        cfg.effort?.let { body.put("reasoning_effort", it) }
+
+        var attempt = 0
+        var result: String? = null
+        while (result == null) {
+            var emitted = false
+            try {
+                result = stream(cfg, body, isCancelled) { emitted = true; onDelta(it) }
+            } catch (e: IOException) {
+                val m = e.message.orEmpty()
+                val retry = !emitted && attempt < 2 && !isCancelled() &&
+                    (m.startsWith("HTTP 503") || m.startsWith("HTTP 429"))
+                if (!retry) throw e
+                attempt++
+                Thread.sleep(1500L * attempt)
+            }
+        }
+        result!!
+    }
+
+    private fun stream(
+        cfg: Cfg, body: JSONObject, isCancelled: () -> Boolean, onDelta: (String) -> Unit
+    ): String {
+        val call = http.newCall(buildReq(cfg, body))
+        call.execute().use { r ->
+            if (!r.isSuccessful) {
+                val txt = r.body?.string().orEmpty()
+                throw IOException("HTTP ${r.code}: ${txt.take(300)}")
+            }
+            val src = r.body!!.source()
+            val full = StringBuilder()
+            if (r.header("Content-Type").orEmpty().contains("event-stream")) {
+                while (true) {
+                    val line = src.readUtf8Line() ?: break
+                    if (isCancelled()) { call.cancel(); throw IOException("cancelled") }
+                    if (!line.startsWith("data:")) continue
+                    val data = line.removePrefix("data:").trim()
+                    if (data == "[DONE]") break
+                    if (data.isEmpty()) continue
+                    val j = runCatching { JSONObject(data) }.getOrNull() ?: continue
+                    if (j.has("error")) throw IOException("API: ${j.opt("error").toString().take(300)}")
+                    val d = j.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("delta")
+                    if (d != null && !d.isNull("content")) {
+                        val s = d.optString("content")
+                        if (s.isNotEmpty()) { full.append(s); onDelta(s) }
+                    }
+                }
+            } else {
+                // server ignored stream=true: plain JSON body
+                val txt = src.readUtf8()
+                val c = JSONObject(txt).getJSONArray("choices").getJSONObject(0)
+                    .getJSONObject("message").getString("content")
+                full.append(c); onDelta(c)
+            }
+            return full.toString().trim()
+        }
     }
 
     /** GET {base}/models -> list of model ids available for this key (OpenAI-compatible shape). */

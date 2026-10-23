@@ -9,7 +9,7 @@ import android.text.Layout
 import android.text.StaticLayout
 import android.text.TextPaint
 import android.view.View
-import org.json.JSONArray
+import org.json.JSONObject
 import kotlin.math.max
 import kotlin.math.min
 
@@ -20,33 +20,55 @@ data class Item(
     val color: Int = 0
 )
 
-object Overlay {
-    /** Returns null if the reply is not a parseable JSON array. */
-    fun parse(raw: String, mode: Int, sw: Int, sh: Int): List<Item>? = runCatching {
-        val s = raw.trim()
-        val a = s.indexOf('[')
-        val z = s.lastIndexOf(']')
-        if (a < 0 || z <= a) return@runCatching null
-        val arr = JSONArray(s.substring(a, z + 1))
-        val out = ArrayList<Item>()
-        for (i in 0 until arr.length()) {
-            val o = arr.optJSONObject(i) ?: continue
-            val text = o.optString("text").trim()
-            val bx = o.optJSONArray("box") ?: continue
-            if (text.isEmpty() || bx.length() < 4) continue
-            val v = DoubleArray(4) { bx.optDouble(it) }
-            if (v.any { it.isNaN() }) continue
-            val q = when (mode) {
-                0 -> listOf(v[1] / 1000, v[0] / 1000, v[3] / 1000, v[2] / 1000)
-                1 -> listOf(v[0] / 1000, v[1] / 1000, v[2] / 1000, v[3] / 1000)
-                else -> listOf(v[0] / sw, v[1] / sh, v[2] / sw, v[3] / sh)
-            }.map { it.coerceIn(0.0, 1.0).toFloat() }
-            val l = min(q[0], q[2]); val r = max(q[0], q[2])
-            val t = min(q[1], q[3]); val b = max(q[1], q[3])
-            if (r - l < 0.005f || b - t < 0.005f) continue
-            out.add(Item(text, l, t, r, b))
+/** Pulls complete top-level {...} objects out of a streamed JSON array, chunk by chunk. */
+class ObjStream {
+    private val sb = StringBuilder()
+    private var depth = 0
+    private var inStr = false
+    private var esc = false
+
+    fun feed(s: String): List<String> {
+        val out = ArrayList<String>()
+        for (ch in s) {
+            if (depth == 0) {
+                if (ch == '{') { depth = 1; sb.setLength(0); sb.append(ch); inStr = false; esc = false }
+                continue
+            }
+            sb.append(ch)
+            if (inStr) {
+                if (esc) esc = false
+                else if (ch == '\\') esc = true
+                else if (ch == '"') inStr = false
+            } else {
+                when (ch) {
+                    '"' -> inStr = true
+                    '{' -> depth++
+                    '}' -> { depth--; if (depth == 0) out.add(sb.toString()) }
+                }
+            }
         }
-        out as List<Item>?
+        return out
+    }
+}
+
+object Overlay {
+    /** One {"text":..., "box":[...]} object -> Item (null if malformed). */
+    fun parseObject(raw: String, mode: Int, sw: Int, sh: Int): Item? = runCatching {
+        val o = JSONObject(raw)
+        if (o.isNull("text")) return@runCatching null
+        val text = o.optString("text").trim()
+        val bx = o.optJSONArray("box") ?: return@runCatching null
+        if (text.isEmpty() || bx.length() < 4) return@runCatching null
+        val v = DoubleArray(4) { bx.optDouble(it) }
+        if (v.any { it.isNaN() }) return@runCatching null
+        val q = when (mode) {
+            0 -> listOf(v[1] / 1000, v[0] / 1000, v[3] / 1000, v[2] / 1000)
+            1 -> listOf(v[0] / 1000, v[1] / 1000, v[2] / 1000, v[3] / 1000)
+            else -> listOf(v[0] / sw, v[1] / sh, v[2] / sw, v[3] / sh)
+        }.map { it.coerceIn(0.0, 1.0).toFloat() }
+        val l = min(q[0], q[2]); val r = max(q[0], q[2])
+        val t = min(q[1], q[3]); val b = max(q[1], q[3])
+        if (r - l < 0.005f || b - t < 0.005f) null else Item(text, l, t, r, b)
     }.getOrNull()
 
     /** Average colour under the original text, used as the label background. */
@@ -64,10 +86,13 @@ object Overlay {
     }
 }
 
-/** Full-screen view that paints each translation over the original text. */
-class TranslationView(ctx: Context, private val items: List<Item>) : View(ctx) {
+/** Full-screen view that paints each translation over the original text. Items can be added while visible. */
+class TranslationView(ctx: Context, private val opaque: Boolean) : View(ctx) {
+    private val items = ArrayList<Item>()
     private val bg = Paint(Paint.ANTI_ALIAS_FLAG)
     private val tp = TextPaint(Paint.ANTI_ALIAS_FLAG)
+
+    fun add(item: Item) { items.add(item); invalidate() }
 
     private fun layout(text: String, size: Float, w: Int, color: Int): StaticLayout {
         tp.textSize = size
@@ -81,17 +106,24 @@ class TranslationView(ctx: Context, private val items: List<Item>) : View(ctx) {
         val w = width.toFloat()
         val h = height.toFloat()
         val pad = 4f * d
+        val ex = 4f * d          // grow the label a bit so the original text is fully covered
         val minSize = 8f * d
         val maxSize = 22f * d
         for (item in items) {
-            val l = item.l * w
-            val t = item.t * h
-            val bw = max(item.r * w - l, 48f * d)
-            val bh = max(item.b * h - t, 14f * d)
+            val l = item.l * w - ex
+            val t = item.t * h - ex / 2
+            val bw = max((item.r - item.l) * w + 2 * ex, 48f * d)
+            val bh = max((item.b - item.t) * h + ex, 14f * d)
             val textW = max((bw - 2 * pad).toInt(), 24)
-            val rgb = item.color
-            val lum = 0.299 * Color.red(rgb) + 0.587 * Color.green(rgb) + 0.114 * Color.blue(rgb)
-            val fg = if (lum > 140) Color.BLACK else Color.WHITE
+
+            // push the background towards dark/light for stronger contrast with the text
+            val sr = Color.red(item.color); val sg = Color.green(item.color); val sb = Color.blue(item.color)
+            val lum = 0.299 * sr + 0.587 * sg + 0.114 * sb
+            val dark = lum <= 140
+            val fg = if (dark) Color.WHITE else Color.BLACK
+            val br: Int; val bgc: Int; val bb: Int
+            if (dark) { br = (sr * 0.6f).toInt(); bgc = (sg * 0.6f).toInt(); bb = (sb * 0.6f).toInt() }
+            else { br = (sr + (255 - sr) * 0.4f).toInt(); bgc = (sg + (255 - sg) * 0.4f).toInt(); bb = (sb + (255 - sb) * 0.4f).toInt() }
 
             var size = (bh * 0.7f).coerceIn(minSize, maxSize)
             var lay = layout(item.text, size, textW, fg)
@@ -100,7 +132,7 @@ class TranslationView(ctx: Context, private val items: List<Item>) : View(ctx) {
                 lay = layout(item.text, size, textW, fg)
             }
             val hh = max(bh, lay.height + pad)
-            bg.color = Color.argb(235, Color.red(rgb), Color.green(rgb), Color.blue(rgb))
+            bg.color = Color.argb(if (opaque) 255 else 235, br, bgc, bb)
             c.drawRoundRect(l, t, l + bw, t + hh, 6f * d, 6f * d, bg)
             c.save()
             c.translate(l + pad, t + (hh - lay.height) / 2f)

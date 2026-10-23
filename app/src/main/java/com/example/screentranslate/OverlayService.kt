@@ -30,7 +30,9 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import java.io.ByteArrayOutputStream
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.abs
+import kotlin.math.min
 
 class OverlayService : Service() {
     companion object { const val ACTION_STOP = "stop"; const val CH = "st_channel" }
@@ -46,9 +48,12 @@ class OverlayService : Service() {
     private var fabLp: WindowManager.LayoutParams? = null
     private var menu: View? = null
     private var panel: View? = null
+    private var panelText: TextView? = null
     private var overlay: View? = null
     private var pending = false
     private var busy = false
+    /** Bumped whenever a translation is cancelled / replaced; stale results are dropped. */
+    @Volatile private var gen = 0
 
     private val timeout = Runnable {
         if (pending) {
@@ -161,7 +166,6 @@ class OverlayService : Service() {
 
     /** Popup next to the floating button: translate / clear / stop. */
     private fun showMenu() {
-        if (busy) return
         val d = resources.displayMetrics.density
         val itemH = (48 * d).toInt()
         val menuW = (160 * d).toInt()
@@ -201,16 +205,24 @@ class OverlayService : Service() {
         menu = box
     }
 
-    private fun menuClear() { removeOverlay(); hidePanel() }
+    /** Cancels any translation in progress and removes everything drawn on screen. */
+    private fun menuClear() {
+        gen++
+        busy = false
+        pending = false
+        main.removeCallbacks(timeout)
+        fab?.visibility = View.VISIBLE
+        fab?.text = "ترجمه"
+        removeOverlay(); hidePanel()
+    }
 
     private fun menuTranslate() {
-        if (busy) return
         if (Store.load(this).key.isBlank()) {
             Toast.makeText(this, "ابتدا API Key را در تنظیمات وارد کنید", Toast.LENGTH_LONG).show()
             return
         }
+        menuClear()           // also cancels a translation that is still running
         busy = true
-        removeOverlay(); hidePanel()
         // small delay so the menu / old translation are gone before the screenshot
         main.postDelayed({ startCapture() }, 250)
     }
@@ -255,45 +267,77 @@ class OverlayService : Service() {
 
     private fun process(bmp: Bitmap) {
         val cfg = Store.load(this)
+        val g = gen
         fab?.text = "…"
         Thread {
-            val scaled = if (bmp.width > 1280)
-                Bitmap.createScaledBitmap(bmp, 1280, bmp.height * 1280 / bmp.width, true) else bmp
+            val targetW = min(cfg.imgWidth, bmp.width)
+            val scaled = if (bmp.width > targetW)
+                Bitmap.createScaledBitmap(bmp, targetW, bmp.height * targetW / bmp.width, true) else bmp
             val out = ByteArrayOutputStream()
-            scaled.compress(Bitmap.CompressFormat.JPEG, 80, out)
+            scaled.compress(Bitmap.CompressFormat.JPEG, 75, out)
             val b64 = Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
-            val r = Api.translate(cfg, b64, scaled.width, scaled.height)
+            val sw = scaled.width
+            val sh = scaled.height
 
-            val items: List<Item>? =
-                if (cfg.boxMode != 3)
-                    r.getOrNull()?.let { Overlay.parse(it, cfg.boxMode, scaled.width, scaled.height) }
-                        ?.map { item -> item.copy(color = Overlay.sample(bmp, item)) }
-                else null
+            val objs = ObjStream()
+            val count = AtomicInteger(0)
+            val acc = StringBuilder()
+
+            val r = Api.translate(cfg, b64, sw, sh, { g != gen }) { delta ->
+                acc.append(delta)
+                if (cfg.boxMode == 3) {
+                    val t = acc.toString()
+                    main.post { if (g == gen) updatePanel(t) }
+                } else {
+                    // labels appear one by one as the model produces them
+                    for (o in objs.feed(delta)) {
+                        val item = Overlay.parseObject(o, cfg.boxMode, sw, sh) ?: continue
+                        count.incrementAndGet()
+                        val colored = item.copy(color = Overlay.sample(bmp, item))
+                        main.post { if (g == gen) addItem(colored, cfg.opaque) }
+                    }
+                }
+            }
 
             main.post {
+                if (g != gen) return@post
                 busy = false
                 fab?.text = "ترجمه"
+                val err = r.exceptionOrNull()
+                val full = r.getOrNull().orEmpty()
                 when {
-                    r.isFailure -> showPanel("خطا: ${r.exceptionOrNull()?.message}")
-                    items == null -> showPanel(r.getOrNull().orEmpty())
-                    items.isEmpty() -> Toast.makeText(this, "متنی برای ترجمه پیدا نشد", Toast.LENGTH_SHORT).show()
-                    else -> showOverlay(items)
+                    err != null && count.get() == 0 -> showPanel("خطا: ${err.message}")
+                    err != null -> Toast.makeText(this, "ترجمه ناقص ماند: ${err.message}", Toast.LENGTH_LONG).show()
+                    cfg.boxMode == 3 -> if (full.isBlank()) Toast.makeText(this, "متنی برای ترجمه پیدا نشد", Toast.LENGTH_SHORT).show()
+                    count.get() == 0 ->
+                        if (full.isBlank() || full.trim() == "[]")
+                            Toast.makeText(this, "متنی برای ترجمه پیدا نشد", Toast.LENGTH_SHORT).show()
+                        else showPanel(full)   // reply was not parseable JSON: show it as plain text
                 }
             }
         }.start()
     }
 
-    /** Paints translations over the original text. Touches pass through to the app below. */
-    private fun showOverlay(items: List<Item>) {
+    // ---------------------------------------------------------------- drawing
+
+    private fun addItem(item: Item, opaque: Boolean) {
+        var v = overlay as? TranslationView
+        if (v == null) v = createOverlay(opaque)
+        v.add(item)
+    }
+
+    /** Full-screen layer that paints translations over the original text. Touches pass through where allowed. */
+    private fun createOverlay(opaque: Boolean): TranslationView {
         removeOverlay()
         val dm = realMetrics()
-        val v = TranslationView(this, items)
+        val v = TranslationView(this, opaque)
         val lp = overlayParams(
             dm.widthPixels, dm.heightPixels,
             WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            alpha = 0.8f   // Android 12+ only lets touches pass through overlays with alpha <= 0.8
+            // Android 12+ only lets touches pass through overlays with alpha <= 0.8
+            alpha = if (opaque) 1.0f else 0.8f
             if (Build.VERSION.SDK_INT >= 28)
                 layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
         }
@@ -303,6 +347,7 @@ class OverlayService : Service() {
             wm.removeView(f)          // re-add so the button stays above the translation
             wm.addView(f, fabLp)
         }
+        return v
     }
 
     private fun removeOverlay() {
@@ -310,7 +355,11 @@ class OverlayService : Service() {
         overlay = null
     }
 
-    /** Fallback: plain text panel (panel mode, errors, unparseable replies). */
+    private fun updatePanel(text: String) {
+        if (panel == null) showPanel(text) else panelText?.text = text
+    }
+
+    /** Plain text panel (panel mode, errors, unparseable replies). */
     private fun showPanel(text: String) {
         hidePanel()
         val d = resources.displayMetrics.density
@@ -334,14 +383,17 @@ class OverlayService : Service() {
             .apply { gravity = Gravity.BOTTOM }
         wm.addView(box, lp)
         panel = box
+        panelText = tv
     }
 
     private fun hidePanel() {
         panel?.let { runCatching { wm.removeView(it) } }
         panel = null
+        panelText = null
     }
 
     override fun onDestroy() {
+        gen++
         main.removeCallbacks(timeout)
         hideMenu()
         hidePanel()

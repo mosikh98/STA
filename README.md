@@ -15,3 +15,7 @@ translated text drawn over the original text (like Google Translate's screen ove
    If the model can't give coordinates, choose "text panel only".
 3. "شروع ترجمه روی صفحه" -> grant overlay + screen-capture permissions.
 4. Tap the floating button -> menu: translate page / clear translation / stop.
+
+## Speed / look settings
+- Reasoning effort (lower = faster), screenshot width, opaque labels.
+- Translation is streamed: labels appear one by one while the model is still answering.

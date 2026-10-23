@@ -25,6 +25,9 @@ class MainActivity : Activity() {
     private lateinit var lang: EditText
     private lateinit var extra: EditText
     private lateinit var mode: Spinner
+    private lateinit var effortSp: Spinner
+    private lateinit var imgSp: Spinner
+    private lateinit var opaqueCb: CheckBox
     private lateinit var status: TextView
     private var cur = Store.GEMINI
     private val ui = Handler(Looper.getMainLooper())
@@ -42,13 +45,7 @@ class MainActivity : Activity() {
         }
 
         root.addView(TextView(this).apply { text = "سرویس‌دهنده" })
-        providerSp = Spinner(this).apply {
-            adapter = ArrayAdapter(
-                this@MainActivity, android.R.layout.simple_spinner_dropdown_item,
-                listOf("Gemini (فقط API Key)", "سفارشی (URL و کلید دلخواه)")
-            )
-            setSelection(cur)
-        }
+        providerSp = spinner(listOf("Gemini (فقط API Key)", "سفارشی (URL و کلید دلخواه)"), cur)
         root.addView(providerSp)
 
         urlBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -62,19 +59,46 @@ class MainActivity : Activity() {
         extra = field(root, "دستورالعمل اضافی (اختیاری)", shared.extra, ltr = false, multi = true)
 
         root.addView(TextView(this).apply { text = "نحوه نمایش / فرمت مختصات مدل"; setPadding(0, 24, 0, 0) })
-        mode = Spinner(this).apply {
-            adapter = ArrayAdapter(
-                this@MainActivity, android.R.layout.simple_spinner_dropdown_item,
-                listOf(
-                    "روی متن اصلی — نرمال ۰–۱۰۰۰ [y1,x1,y2,x2] (Gemini و مشابه)",
-                    "روی متن اصلی — نرمال ۰–۱۰۰۰ [x1,y1,x2,y2]",
-                    "روی متن اصلی — پیکسل [x1,y1,x2,y2] (Qwen-VL و مشابه)",
-                    "فقط پنل متنی (بدون مختصات)"
-                )
-            )
-            setSelection(shared.boxMode.coerceIn(0, 3))
-        }
+        mode = spinner(
+            listOf(
+                "روی متن اصلی — نرمال ۰–۱۰۰۰ [y1,x1,y2,x2] (Gemini و مشابه)",
+                "روی متن اصلی — نرمال ۰–۱۰۰۰ [x1,y1,x2,y2]",
+                "روی متن اصلی — پیکسل [x1,y1,x2,y2] (Qwen-VL و مشابه)",
+                "فقط پنل متنی (بدون مختصات)"
+            ),
+            shared.boxMode.coerceIn(0, 3)
+        )
         root.addView(mode)
+
+        root.addView(TextView(this).apply { text = "میزان تفکر مدل (کمتر = سریع‌تر)"; setPadding(0, 24, 0, 0) })
+        effortSp = spinner(
+            listOf(
+                "خودکار (Gemini: کم / سفارشی: ارسال نشود)",
+                "ارسال نشود",
+                "حداقل (minimal)",
+                "کم (low)",
+                "متوسط (medium)"
+            ),
+            Store.effortIdx(this).coerceIn(0, 4)
+        )
+        root.addView(effortSp)
+
+        root.addView(TextView(this).apply { text = "اندازه تصویر ارسالی (کوچک‌تر = سریع‌تر)"; setPadding(0, 24, 0, 0) })
+        imgSp = spinner(
+            listOf("سریع — عرض ۸۰۰", "متعادل — عرض ۱۰۲۴", "دقیق — عرض ۱۲۸۰"),
+            Store.imgIdx(this).coerceIn(0, 2)
+        )
+        root.addView(imgSp)
+
+        opaqueCb = CheckBox(this).apply {
+            text = "برچسب‌های مات و پررنگ (متن زیرشان دیده نشود)"
+            isChecked = Store.opaque(this@MainActivity)
+        }
+        root.addView(opaqueCb)
+        root.addView(TextView(this).apply {
+            text = "نکته: در اندروید ۱۲ به بالا، تا وقتی ترجمه مات روی صفحه است لمس بازی زیرش کار نمی‌کند؛ با منوی «پاک کردن ترجمه» برش دارید."
+            textSize = 12f
+        })
 
         status = TextView(this).apply { setPadding(0, 20, 0, 20) }
         root.addView(status)
@@ -100,6 +124,11 @@ class MainActivity : Activity() {
         }
 
         setContentView(ScrollView(this).apply { addView(root) })
+    }
+
+    private fun spinner(items: List<String>, selected: Int) = Spinner(this).apply {
+        adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, items)
+        setSelection(selected)
     }
 
     private fun applyProviderUi() {
@@ -147,7 +176,8 @@ class MainActivity : Activity() {
         Store.setProvider(this, cur)
         Store.saveShared(
             this, lang.text.toString().trim().ifBlank { "Persian" },
-            extra.text.toString().trim(), mode.selectedItemPosition
+            extra.text.toString().trim(), mode.selectedItemPosition,
+            effortSp.selectedItemPosition, imgSp.selectedItemPosition, opaqueCb.isChecked
         )
     }
 
@@ -171,11 +201,12 @@ class MainActivity : Activity() {
         ui.post(tick)
         Thread {
             val r = Api.test(cfg)
+            val secs = (System.currentTimeMillis() - t0) / 1000.0
             runOnUiThread {
                 running = false
                 ui.removeCallbacks(tick)
                 status.text = r.fold(
-                    { "اتصال موفق ✓  (پاسخ: $it)" },
+                    { "اتصال موفق ✓  (${"%.1f".format(secs)} ثانیه) پاسخ: $it" },
                     { "خطا ✗  ${errText(it)}" }
                 )
             }
