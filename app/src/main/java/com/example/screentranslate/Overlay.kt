@@ -9,7 +9,6 @@ import android.text.Layout
 import android.text.StaticLayout
 import android.text.TextPaint
 import android.view.View
-import org.json.JSONObject
 import kotlin.math.max
 import kotlin.math.min
 
@@ -20,56 +19,48 @@ data class Item(
     val color: Int = 0
 )
 
-/** Pulls complete top-level {...} objects out of a streamed JSON array, chunk by chunk. */
-class ObjStream {
+/** Splits a streamed reply into complete lines. */
+class LineStream {
     private val sb = StringBuilder()
-    private var depth = 0
-    private var inStr = false
-    private var esc = false
 
     fun feed(s: String): List<String> {
         val out = ArrayList<String>()
         for (ch in s) {
-            if (depth == 0) {
-                if (ch == '{') { depth = 1; sb.setLength(0); sb.append(ch); inStr = false; esc = false }
-                continue
-            }
-            sb.append(ch)
-            if (inStr) {
-                if (esc) esc = false
-                else if (ch == '\\') esc = true
-                else if (ch == '"') inStr = false
-            } else {
-                when (ch) {
-                    '"' -> inStr = true
-                    '{' -> depth++
-                    '}' -> { depth--; if (depth == 0) out.add(sb.toString()) }
-                }
-            }
+            if (ch == '\n') { out.add(sb.toString()); sb.setLength(0) } else sb.append(ch)
         }
         return out
+    }
+
+    /** The last, unterminated line (if any). */
+    fun flush(): String? {
+        if (sb.isBlank()) return null
+        val s = sb.toString()
+        sb.setLength(0)
+        return s
     }
 }
 
 object Overlay {
-    /** One {"text":..., "box":[...]} object -> Item (null if malformed). */
-    fun parseObject(raw: String, mode: Int, sw: Int, sh: Int): Item? = runCatching {
-        val o = JSONObject(raw)
-        if (o.isNull("text")) return@runCatching null
-        val text = o.optString("text").trim()
-        val bx = o.optJSONArray("box") ?: return@runCatching null
-        if (text.isEmpty() || bx.length() < 4) return@runCatching null
-        val v = DoubleArray(4) { bx.optDouble(it) }
-        if (v.any { it.isNaN() }) return@runCatching null
+    private val boxRe = Regex(
+        """^\s*\[?\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\]?\s*\|\s*(.+?)\s*$"""
+    )
+
+    /** One line "a,b,c,d|translation" -> Item (null if the line is not in that form). */
+    fun parseBoxLine(line: String, mode: Int, sw: Int, sh: Int): Item? {
+        val m = boxRe.find(line) ?: return null
+        val v = DoubleArray(4) { m.groupValues[it + 1].toDouble() }
+        val text = m.groupValues[5].trim()
+        if (text.isEmpty()) return null
         val q = when (mode) {
             0 -> listOf(v[1] / 1000, v[0] / 1000, v[3] / 1000, v[2] / 1000)
             1 -> listOf(v[0] / 1000, v[1] / 1000, v[2] / 1000, v[3] / 1000)
             else -> listOf(v[0] / sw, v[1] / sh, v[2] / sw, v[3] / sh)
         }.map { it.coerceIn(0.0, 1.0).toFloat() }
         val l = min(q[0], q[2]); val r = max(q[0], q[2])
-        val t = min(q[1], q[3]); val b = max(q[1], q[3])
-        if (r - l < 0.005f || b - t < 0.005f) null else Item(text, l, t, r, b)
-    }.getOrNull()
+        val t = min(q[1], q[3]); val bt = max(q[1], q[3])
+        if (r - l < 0.005f || bt - t < 0.005f) return null
+        return Item(text, l, t, r, bt)
+    }
 
     /** Average colour under the original text, used as the label background. */
     fun sample(bmp: Bitmap, item: Item): Int {

@@ -9,10 +9,12 @@ data class Cfg(
     val model: String,
     val lang: String,
     val extra: String,
-    val boxMode: Int,            // 0: [ymin,xmin,ymax,xmax]/1000, 1: [xmin,ymin,xmax,ymax]/1000, 2: pixels, 3: text panel only
+    val boxMode: Int,            // vision method: 0 [y1,x1,y2,x2]/1000, 1 [x1,y1,x2,y2]/1000, 2 pixels, 3 text panel only
     val effort: String? = null,  // reasoning_effort sent with translation requests (null = not sent)
-    val imgWidth: Int = 1024,    // width of the screenshot sent to the model
-    val opaque: Boolean = true   // fully opaque labels
+    val imgWidth: Int = 1024,    // width of the screenshot sent to the model (vision method)
+    val opaque: Boolean = true,  // fully opaque labels
+    val method: Int = 1,         // 0 = vision model reads the image, 1 = on-phone OCR + text translation
+    val ocrScript: Int = 0       // 0 Chinese+Latin, 1 Latin, 2 Japanese+Latin, 3 Korean+Latin
 )
 
 /** Per-provider settings: Gemini keeps its own key/model, Custom keeps its own URL/key/model. */
@@ -31,6 +33,8 @@ object Store {
     fun effortIdx(c: Context) = p(c).getInt("effortIdx", 0)
     fun imgIdx(c: Context) = p(c).getInt("imgIdx", 1)
     fun opaque(c: Context) = p(c).getBoolean("opaque", true)
+    fun methodIdx(c: Context) = p(c).getInt("method", 1)
+    fun ocrIdx(c: Context) = p(c).getInt("ocrScript", 0)
 
     fun profile(c: Context, prov: Int): Profile {
         val s = p(c)
@@ -53,10 +57,11 @@ object Store {
 
     fun saveShared(
         c: Context, lang: String, extra: String, boxMode: Int,
-        effortIdx: Int, imgIdx: Int, opaque: Boolean
+        effortIdx: Int, imgIdx: Int, opaque: Boolean, method: Int, ocrScript: Int
     ) {
         p(c).edit().putString("lang", lang).putString("extra", extra).putInt("boxMode", boxMode)
-            .putInt("effortIdx", effortIdx).putInt("imgIdx", imgIdx).putBoolean("opaque", opaque).apply()
+            .putInt("effortIdx", effortIdx).putInt("imgIdx", imgIdx).putBoolean("opaque", opaque)
+            .putInt("method", method).putInt("ocrScript", ocrScript).apply()
     }
 
     fun load(c: Context): Cfg {
@@ -76,7 +81,8 @@ object Store {
             s.getString("lang", "Persian")!!,
             s.getString("extra", "")!!,
             s.getInt("boxMode", 0),
-            effort, imgW, opaque(c)
+            effort, imgW, opaque(c),
+            methodIdx(c).coerceIn(0, 1), ocrIdx(c).coerceIn(0, 3)
         )
     }
 }

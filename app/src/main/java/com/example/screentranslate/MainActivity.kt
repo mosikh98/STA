@@ -27,6 +27,8 @@ class MainActivity : Activity() {
     private lateinit var mode: Spinner
     private lateinit var effortSp: Spinner
     private lateinit var imgSp: Spinner
+    private lateinit var methodSp: Spinner
+    private lateinit var ocrSp: Spinner
     private lateinit var opaqueCb: CheckBox
     private lateinit var status: TextView
     private var cur = Store.GEMINI
@@ -58,7 +60,24 @@ class MainActivity : Activity() {
         lang = field(root, "زبان مقصد (به انگلیسی بنویسید، مثلاً Persian)", shared.lang)
         extra = field(root, "دستورالعمل اضافی (اختیاری)", shared.extra, ltr = false, multi = true)
 
-        root.addView(TextView(this).apply { text = "نحوه نمایش / فرمت مختصات مدل"; setPadding(0, 24, 0, 0) })
+        root.addView(TextView(this).apply { text = "روش ترجمه"; setPadding(0, 24, 0, 0) })
+        methodSp = spinner(
+            listOf(
+                "سریع: OCR روی گوشی + ترجمه متن با API (توصیه‌شده)",
+                "مدل بینایی: عکس مستقیم به مدل (کندتر)"
+            ),
+            Store.methodIdx(this).coerceIn(0, 1)
+        )
+        root.addView(methodSp)
+
+        root.addView(TextView(this).apply { text = "زبان متن روی صفحه (برای OCR)"; setPadding(0, 24, 0, 0) })
+        ocrSp = spinner(
+            listOf("چینی + انگلیسی/لاتین", "انگلیسی و زبان‌های لاتین", "ژاپنی + لاتین", "کره‌ای + لاتین"),
+            Store.ocrIdx(this).coerceIn(0, 3)
+        )
+        root.addView(ocrSp)
+
+        root.addView(TextView(this).apply { text = "فرمت مختصات (فقط روش «مدل بینایی»)"; setPadding(0, 24, 0, 0) })
         mode = spinner(
             listOf(
                 "روی متن اصلی — نرمال ۰–۱۰۰۰ [y1,x1,y2,x2] (Gemini و مشابه)",
@@ -177,7 +196,8 @@ class MainActivity : Activity() {
         Store.saveShared(
             this, lang.text.toString().trim().ifBlank { "Persian" },
             extra.text.toString().trim(), mode.selectedItemPosition,
-            effortSp.selectedItemPosition, imgSp.selectedItemPosition, opaqueCb.isChecked
+            effortSp.selectedItemPosition, imgSp.selectedItemPosition, opaqueCb.isChecked,
+            methodSp.selectedItemPosition, ocrSp.selectedItemPosition
         )
     }
 

@@ -19,3 +19,7 @@ translated text drawn over the original text (like Google Translate's screen ove
 ## Speed / look settings
 - Reasoning effort (lower = faster), screenshot width, opaque labels.
 - Translation is streamed: labels appear one by one while the model is still answering.
+
+## Methods
+- Fast (default): ML Kit OCR on the phone finds text + boxes, only the text goes to your API.
+- Vision model: whole screenshot goes to the model (slower, compact line output, streamed).

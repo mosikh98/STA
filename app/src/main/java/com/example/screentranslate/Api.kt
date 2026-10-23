@@ -49,44 +49,13 @@ object Api {
         post(cfg, body, fast)
     }
 
-    /**
-     * Streams the translation. onDelta receives text chunks as they arrive, so the UI can
-     * show results before the model has finished. isCancelled is polled while reading.
-     * Returns the full text. Retries a few times on 503/429 if nothing was received yet.
-     */
-    fun translate(
-        cfg: Cfg, jpegBase64: String, w: Int, h: Int,
-        isCancelled: () -> Boolean, onDelta: (String) -> Unit
-    ): Result<String> = runCatching {
-        val extra = if (cfg.extra.isNotBlank()) "\nExtra instructions: ${cfg.extra}" else ""
-        val system = if (cfg.boxMode == 3) {
-            "You are a screen translator. Read all visible text in the screenshot and translate it " +
-            "into ${cfg.lang}. Output only the translation, in on-screen order.$extra"
-        } else {
-            val fmt = when (cfg.boxMode) {
-                0 -> "[ymin, xmin, ymax, xmax] normalized to 0-1000"
-                1 -> "[xmin, ymin, xmax, ymax] normalized to 0-1000"
-                else -> "[xmin, ymin, xmax, ymax] in pixels of the image (${w}x${h})"
-            }
-            "You are a screen translator. Find every separate piece of text in the screenshot " +
-            "(UI labels, quest text, chat, tooltips...) and translate it into ${cfg.lang}. " +
-            "Reply with ONLY a JSON array, no markdown fences, in the form " +
-            "[{\"text\":\"<translation>\",\"box\":[a,b,c,d]}]. " +
-            "box is the tight bounding box of the ORIGINAL text, $fmt. " +
-            "Merge a multi-line paragraph into one item. Skip text already in ${cfg.lang} and skip pure numbers.$extra"
-        }
-        val content = JSONArray()
-            .put(JSONObject().put("type", "text").put("text", "Translate the text in this screenshot into ${cfg.lang}."))
-            .put(JSONObject().put("type", "image_url").put("image_url",
-                JSONObject().put("url", "data:image/jpeg;base64,$jpegBase64")))
-        val body = JSONObject()
-            .put("model", cfg.model)
-            .put("stream", true)
-            .put("messages", JSONArray()
-                .put(JSONObject().put("role", "system").put("content", system))
-                .put(JSONObject().put("role", "user").put("content", content)))
-        cfg.effort?.let { body.put("reasoning_effort", it) }
+    private fun extraOf(cfg: Cfg) =
+        if (cfg.extra.isNotBlank()) "\nExtra instructions: ${cfg.extra}" else ""
 
+    /** Retries a few times on 503/429 if nothing was received yet. */
+    private fun runStream(
+        cfg: Cfg, body: JSONObject, isCancelled: () -> Boolean, onDelta: (String) -> Unit
+    ): String {
         var attempt = 0
         var result: String? = null
         while (result == null) {
@@ -102,7 +71,67 @@ object Api {
                 Thread.sleep(1500L * attempt)
             }
         }
-        result!!
+        return result!!
+    }
+
+    /**
+     * Vision method: the model reads the screenshot itself. Replies one item per line,
+     * "a,b,c,d|translation" (compact, so fewer tokens are generated), streamed.
+     */
+    fun translate(
+        cfg: Cfg, jpegBase64: String, w: Int, h: Int,
+        isCancelled: () -> Boolean, onDelta: (String) -> Unit
+    ): Result<String> = runCatching {
+        val extra = extraOf(cfg)
+        val system = if (cfg.boxMode == 3) {
+            "You are a screen translator. Read all visible text in the screenshot and translate it " +
+            "into ${cfg.lang}. Output only the translation, in on-screen order.$extra"
+        } else {
+            val fmt = when (cfg.boxMode) {
+                0 -> "[ymin, xmin, ymax, xmax] as integers normalized to 0-1000"
+                1 -> "[xmin, ymin, xmax, ymax] as integers normalized to 0-1000"
+                else -> "[xmin, ymin, xmax, ymax] in pixels of the image (${w}x${h})"
+            }
+            "You are a screen translator. Find every separate piece of text in the screenshot " +
+            "(UI labels, quest text, chat, tooltips...) and translate it into ${cfg.lang}. " +
+            "Reply with ONLY lines, one per text item, in the exact form a,b,c,d|translation " +
+            "where a,b,c,d is the tight bounding box of the ORIGINAL text, $fmt. " +
+            "No JSON, no markdown, no numbering, no other text. Merge a multi-line paragraph into one line. " +
+            "Skip text already in ${cfg.lang} and skip pure numbers.$extra"
+        }
+        val content = JSONArray()
+            .put(JSONObject().put("type", "text").put("text", "Translate the text in this screenshot into ${cfg.lang}."))
+            .put(JSONObject().put("type", "image_url").put("image_url",
+                JSONObject().put("url", "data:image/jpeg;base64,$jpegBase64")))
+        val body = JSONObject()
+            .put("model", cfg.model)
+            .put("stream", true)
+            .put("messages", JSONArray()
+                .put(JSONObject().put("role", "system").put("content", system))
+                .put(JSONObject().put("role", "user").put("content", content)))
+        cfg.effort?.let { body.put("reasoning_effort", it) }
+        runStream(cfg, body, isCancelled, onDelta)
+    }
+
+    /**
+     * OCR method: only text is sent (no image). Input lines "N|source", reply lines "N|translation".
+     */
+    fun translateText(
+        cfg: Cfg, numberedLines: String,
+        isCancelled: () -> Boolean, onDelta: (String) -> Unit
+    ): Result<String> = runCatching {
+        val system = "You are a screen translator for a phone game / app UI. Translate each numbered line " +
+            "into ${cfg.lang}. Reply with exactly one line per input line, in the form N|translation, " +
+            "using the same numbers and the same order. No extra text, no markdown. Keep translations short. " +
+            "Leave numbers, symbols and untranslatable names as they are.${extraOf(cfg)}"
+        val body = JSONObject()
+            .put("model", cfg.model)
+            .put("stream", true)
+            .put("messages", JSONArray()
+                .put(JSONObject().put("role", "system").put("content", system))
+                .put(JSONObject().put("role", "user").put("content", numberedLines)))
+        cfg.effort?.let { body.put("reasoning_effort", it) }
+        runStream(cfg, body, isCancelled, onDelta)
     }
 
     private fun stream(

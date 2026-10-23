@@ -270,52 +270,108 @@ class OverlayService : Service() {
         val g = gen
         fab?.text = "…"
         Thread {
-            val targetW = min(cfg.imgWidth, bmp.width)
-            val scaled = if (bmp.width > targetW)
-                Bitmap.createScaledBitmap(bmp, targetW, bmp.height * targetW / bmp.width, true) else bmp
-            val out = ByteArrayOutputStream()
-            scaled.compress(Bitmap.CompressFormat.JPEG, 75, out)
-            val b64 = Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
-            val sw = scaled.width
-            val sh = scaled.height
-
-            val objs = ObjStream()
-            val count = AtomicInteger(0)
-            val acc = StringBuilder()
-
-            val r = Api.translate(cfg, b64, sw, sh, { g != gen }) { delta ->
-                acc.append(delta)
-                if (cfg.boxMode == 3) {
-                    val t = acc.toString()
-                    main.post { if (g == gen) updatePanel(t) }
-                } else {
-                    // labels appear one by one as the model produces them
-                    for (o in objs.feed(delta)) {
-                        val item = Overlay.parseObject(o, cfg.boxMode, sw, sh) ?: continue
-                        count.incrementAndGet()
-                        val colored = item.copy(color = Overlay.sample(bmp, item))
-                        main.post { if (g == gen) addItem(colored, cfg.opaque) }
-                    }
-                }
-            }
-
-            main.post {
-                if (g != gen) return@post
-                busy = false
-                fab?.text = "ترجمه"
-                val err = r.exceptionOrNull()
-                val full = r.getOrNull().orEmpty()
-                when {
-                    err != null && count.get() == 0 -> showPanel("خطا: ${err.message}")
-                    err != null -> Toast.makeText(this, "ترجمه ناقص ماند: ${err.message}", Toast.LENGTH_LONG).show()
-                    cfg.boxMode == 3 -> if (full.isBlank()) Toast.makeText(this, "متنی برای ترجمه پیدا نشد", Toast.LENGTH_SHORT).show()
-                    count.get() == 0 ->
-                        if (full.isBlank() || full.trim() == "[]")
-                            Toast.makeText(this, "متنی برای ترجمه پیدا نشد", Toast.LENGTH_SHORT).show()
-                        else showPanel(full)   // reply was not parseable JSON: show it as plain text
-                }
-            }
+            if (cfg.method == 1) runOcr(cfg, bmp, g) else runVision(cfg, bmp, g)
         }.start()
+    }
+
+    private fun fail(g: Int, msg: String) {
+        main.post {
+            if (g == gen) { busy = false; fab?.text = "ترجمه"; showPanel(msg) }
+        }
+    }
+
+    /** Called when streaming ended (also with errors). Items have already been drawn as they arrived. */
+    private fun finish(g: Int, cfg: Cfg, r: Result<String>, count: Int) {
+        main.post {
+            if (g != gen) return@post
+            busy = false
+            fab?.text = "ترجمه"
+            val err = r.exceptionOrNull()
+            val full = r.getOrNull().orEmpty()
+            when {
+                err != null && count == 0 -> showPanel("خطا: ${err.message}")
+                err != null -> Toast.makeText(this, "ترجمه ناقص ماند: ${err.message}", Toast.LENGTH_LONG).show()
+                cfg.method == 0 && cfg.boxMode == 3 ->
+                    if (full.isBlank()) Toast.makeText(this, "متنی برای ترجمه پیدا نشد", Toast.LENGTH_SHORT).show()
+                count == 0 ->
+                    if (full.isBlank()) Toast.makeText(this, "متنی برای ترجمه پیدا نشد", Toast.LENGTH_SHORT).show()
+                    else showPanel(full)   // reply was not in the expected line format: show as plain text
+                else -> Unit
+            }
+            Unit
+        }
+    }
+
+    /** Fast method: ML Kit OCR on the phone (boxes), then only the text goes to the API. */
+    private fun runOcr(cfg: Cfg, bmp: Bitmap, g: Int) {
+        val blocks = try {
+            Ocr.recognize(bmp, cfg.ocrScript)
+        } catch (e: Throwable) {
+            fail(g, "خطای OCR: ${e.message}")
+            return
+        }
+        if (g != gen) return
+        if (blocks.isEmpty()) { finish(g, cfg, Result.success(""), 0); return }
+
+        val numbered = StringBuilder()
+        blocks.forEachIndexed { i, b -> numbered.append(i + 1).append('|').append(b.text).append('\n') }
+
+        val ls = LineStream()
+        val count = AtomicInteger(0)
+        val re = Regex("^\\s*(\\d+)\\s*\\|\\s*(.+)\$")
+
+        fun handle(line: String) {
+            val m = re.find(line) ?: return
+            val idx = m.groupValues[1].toIntOrNull() ?: return
+            val b = blocks.getOrNull(idx - 1) ?: return
+            val t = m.groupValues[2].trim()
+            if (t.isEmpty()) return
+            count.incrementAndGet()
+            val base = Item(t, b.l, b.t, b.r, b.b)
+            val item = base.copy(color = Overlay.sample(bmp, base))
+            main.post { if (g == gen) addItem(item, cfg.opaque) }
+        }
+
+        val r = Api.translateText(cfg, numbered.toString(), { g != gen }) { delta ->
+            for (ln in ls.feed(delta)) handle(ln)
+        }
+        ls.flush()?.let { handle(it) }
+        finish(g, cfg, r, count.get())
+    }
+
+    /** Vision method: the whole screenshot goes to the model, which returns text + boxes. */
+    private fun runVision(cfg: Cfg, bmp: Bitmap, g: Int) {
+        val targetW = min(cfg.imgWidth, bmp.width)
+        val scaled = if (bmp.width > targetW)
+            Bitmap.createScaledBitmap(bmp, targetW, bmp.height * targetW / bmp.width, true) else bmp
+        val out = ByteArrayOutputStream()
+        scaled.compress(Bitmap.CompressFormat.JPEG, 75, out)
+        val b64 = Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
+        val sw = scaled.width
+        val sh = scaled.height
+
+        val ls = LineStream()
+        val count = AtomicInteger(0)
+        val acc = StringBuilder()
+
+        fun handle(line: String) {
+            val item = Overlay.parseBoxLine(line, cfg.boxMode, sw, sh) ?: return
+            count.incrementAndGet()
+            val colored = item.copy(color = Overlay.sample(bmp, item))
+            main.post { if (g == gen) addItem(colored, cfg.opaque) }
+        }
+
+        val r = Api.translate(cfg, b64, sw, sh, { g != gen }) { delta ->
+            acc.append(delta)
+            if (cfg.boxMode == 3) {
+                val t = acc.toString()
+                main.post { if (g == gen) updatePanel(t) }
+            } else {
+                for (ln in ls.feed(delta)) handle(ln)
+            }
+        }
+        if (cfg.boxMode != 3) ls.flush()?.let { handle(it) }
+        finish(g, cfg, r, count.get())
     }
 
     // ---------------------------------------------------------------- drawing
