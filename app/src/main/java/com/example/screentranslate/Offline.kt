@@ -2,15 +2,41 @@ package com.example.screentranslate
 
 import com.google.android.gms.tasks.Task
 import com.google.mlkit.common.model.DownloadConditions
+import com.google.mlkit.common.model.RemoteModelManager
 import com.google.mlkit.nl.languageid.LanguageIdentification
 import com.google.mlkit.nl.translate.TranslateLanguage
+import com.google.mlkit.nl.translate.TranslateRemoteModel
 import com.google.mlkit.nl.translate.Translation
 import com.google.mlkit.nl.translate.Translator
 import com.google.mlkit.nl.translate.TranslatorOptions
-import java.util.Locale
 import java.util.concurrent.CountDownLatch
 
-/** Fully on-device translation (ML Kit). Language models are downloaded once, then work offline. */
+/** Download / delete / list the on-device translation models (callbacks run on the main thread). */
+object Models {
+    private val mgr get() = RemoteModelManager.getInstance()
+
+    fun downloaded(cb: (Set<String>) -> Unit) {
+        mgr.getDownloadedModels(TranslateRemoteModel::class.java)
+            .addOnSuccessListener { set -> cb(set.map { it.language }.toSet()) }
+            .addOnFailureListener { cb(emptySet()) }
+    }
+
+    fun download(code: String, wifiOnly: Boolean, onDone: (Throwable?) -> Unit) {
+        val model = TranslateRemoteModel.Builder(code).build()
+        val cond = DownloadConditions.Builder().apply { if (wifiOnly) requireWifi() }.build()
+        mgr.download(model, cond)
+            .addOnSuccessListener { onDone(null) }
+            .addOnFailureListener { onDone(it) }
+    }
+
+    fun delete(code: String, onDone: (Throwable?) -> Unit) {
+        mgr.deleteDownloadedModel(TranslateRemoteModel.Builder(code).build())
+            .addOnSuccessListener { onDone(null) }
+            .addOnFailureListener { onDone(it) }
+    }
+}
+
+/** Fully on-device translation (ML Kit). */
 object Offline {
     private val translators = HashMap<String, Translator>()
 
@@ -26,14 +52,6 @@ object Offline {
         return res as T
     }
 
-    /** "Persian" / "fa" -> "fa" (null if ML Kit has no such language). */
-    fun targetCode(lang: String): String? {
-        val q = lang.trim().lowercase()
-        return TranslateLanguage.getAllLanguages().firstOrNull { code ->
-            code == q || Locale.forLanguageTag(code).getDisplayLanguage(Locale.ENGLISH).lowercase() == q
-        }
-    }
-
     private fun translator(src: String, dst: String): Translator = synchronized(translators) {
         translators.getOrPut("$src>$dst") {
             Translation.getClient(
@@ -42,7 +60,7 @@ object Offline {
         }
     }
 
-    /** Script-based guess; returns null for plain Latin text (then the language identifier decides). */
+    /** Script-based guess; null for plain Latin text (then the language identifier decides). */
     private fun guessCjk(t: String): String? = when {
         t.any { it in '\u3040'..'\u30FF' } -> TranslateLanguage.JAPANESE
         t.any { it in '\uAC00'..'\uD7AF' } -> TranslateLanguage.KOREAN
@@ -50,27 +68,34 @@ object Offline {
         else -> null
     }
 
-    /** Blocking: call from a background thread. onResult(index, translation) is called per block. */
+    /**
+     * Blocking: call from a background thread. src is a language code or "auto".
+     * onResult(index, translation) is called per block as soon as it is translated.
+     */
     fun translate(
-        lang: String, blocks: List<OcrBlock>,
+        src: String, dst: String, blocks: List<OcrBlock>,
         isCancelled: () -> Boolean, onStatus: (String) -> Unit, onResult: (Int, String) -> Unit
     ) {
-        val dst = targetCode(lang) ?: throw IllegalArgumentException(
-            "زبان مقصد «$lang» برای ترجمه آفلاین پشتیبانی نمی‌شود (نام انگلیسی زبان را بنویسید، مثلاً Persian)"
-        )
-        val idClient = LanguageIdentification.getClient()
+        val supported = TranslateLanguage.getAllLanguages()
+        if (dst !in supported) throw IllegalArgumentException("این زبان خروجی برای ترجمه آفلاین پشتیبانی نمی‌شود: $dst")
+        val fixed = if (src == "auto") null else src
+        if (fixed != null && fixed !in supported)
+            throw IllegalArgumentException("این زبان ورودی برای ترجمه آفلاین پشتیبانی نمی‌شود: $fixed")
+        val idClient = if (fixed == null) LanguageIdentification.getClient() else null
         val ready = HashSet<String>()
+
         for ((i, b) in blocks.withIndex()) {
             if (isCancelled()) return
-            val src = guessCjk(b.text) ?: run {
-                val tag = runCatching { await(idClient.identifyLanguage(b.text)) }.getOrDefault("und")
+            val s = fixed ?: guessCjk(b.text) ?: run {
+                val tag = runCatching { await(idClient!!.identifyLanguage(b.text)) }.getOrDefault("und")
                 if (tag == "und") TranslateLanguage.ENGLISH
                 else TranslateLanguage.fromLanguageTag(tag) ?: TranslateLanguage.ENGLISH
             }
-            if (src == dst) continue
-            val tr = translator(src, dst)
-            if (ready.add(src)) {
-                onStatus("در حال آماده‌سازی مدل ترجمه ($src→$dst)؛ بار اول دانلود می‌شود")
+            if (s == dst) continue
+            val tr = translator(s, dst)
+            if (ready.add(s)) {
+                // normally a no-op: models are downloaded from the language manager inside the app
+                onStatus("در حال آماده‌سازی مدل ترجمه ($s→$dst)؛ اگر دانلود نشده باشد بار اول دانلود می‌شود")
                 await(tr.downloadModelIfNeeded(DownloadConditions.Builder().build()))
             }
             if (isCancelled()) return

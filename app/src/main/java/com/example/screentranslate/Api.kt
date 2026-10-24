@@ -120,7 +120,8 @@ object Api {
         cfg: Cfg, numberedLines: String,
         isCancelled: () -> Boolean, onDelta: (String) -> Unit
     ): Result<String> = runCatching {
-        val system = "You are a screen translator for a phone game / app UI. Translate each numbered line " +
+        val from = if (cfg.src != "auto") " from ${Langs.enName(cfg.src)}" else ""
+        val system = "You are a screen translator for a phone game / app UI. Translate each numbered line$from " +
             "into ${cfg.lang}. Reply with exactly one line per input line, in the form N|translation, " +
             "using the same numbers and the same order. No extra text, no markdown. Keep translations short. " +
             "Leave numbers, symbols and untranslatable names as they are.${extraOf(cfg)}"

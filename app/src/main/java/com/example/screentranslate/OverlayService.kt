@@ -356,7 +356,7 @@ class OverlayService : Service() {
         val count = AtomicInteger(0)
         val r: Result<String> = try {
             Offline.translate(
-                cfg.lang, blocks, { g != gen },
+                cfg.src, cfg.dst, blocks, { g != gen },
                 { msg -> main.post { if (g == gen) Toast.makeText(this, msg, Toast.LENGTH_LONG).show() } }
             ) { idx, text ->
                 val b = blocks[idx]

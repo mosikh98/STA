@@ -7,14 +7,16 @@ data class Cfg(
     val url: String,
     val key: String,
     val model: String,
-    val lang: String,
+    val lang: String,            // English name of the target language (used in prompts)
     val extra: String,
     val boxMode: Int,            // vision method: 0 [y1,x1,y2,x2]/1000, 1 [x1,y1,x2,y2]/1000, 2 pixels, 3 text panel only
-    val effort: String? = null,  // reasoning_effort sent with translation requests (null = not sent)
+    val effort: String? = null,  // reasoning_effort sent with API requests (null = not sent)
     val imgWidth: Int = 1024,    // width of the screenshot sent to the model (vision method)
     val opaque: Boolean = true,  // fully opaque labels
-    val method: Int = 1,         // 0 = vision model reads the image, 1 = on-phone OCR + API text translation, 2 = fully offline
-    val ocrScript: Int = 0       // 0 Chinese+Latin, 1 Latin, 2 Japanese+Latin, 3 Korean+Latin
+    val method: Int = 1,         // 0 = vision model, 1 = on-phone OCR + API text translation, 2 = fully offline
+    val ocrScript: Int = 0,      // derived from the input language
+    val src: String = "auto",    // input language code or "auto"
+    val dst: String = "fa"       // output language code
 )
 
 /** Per-provider settings: Gemini keeps its own key/model, Custom keeps its own URL/key/model. */
@@ -34,7 +36,8 @@ object Store {
     fun imgIdx(c: Context) = p(c).getInt("imgIdx", 1)
     fun opaque(c: Context) = p(c).getBoolean("opaque", true)
     fun methodIdx(c: Context) = p(c).getInt("method", 1)
-    fun ocrIdx(c: Context) = p(c).getInt("ocrScript", 0)
+    fun srcLang(c: Context) = p(c).getString("srcLang", "auto")!!
+    fun dstLang(c: Context) = p(c).getString("dstLang", "fa")!!
 
     fun profile(c: Context, prov: Int): Profile {
         val s = p(c)
@@ -56,12 +59,12 @@ object Store {
     }
 
     fun saveShared(
-        c: Context, lang: String, extra: String, boxMode: Int,
-        effortIdx: Int, imgIdx: Int, opaque: Boolean, method: Int, ocrScript: Int
+        c: Context, extra: String, boxMode: Int, effortIdx: Int, imgIdx: Int, opaque: Boolean,
+        method: Int, src: String, dst: String
     ) {
-        p(c).edit().putString("lang", lang).putString("extra", extra).putInt("boxMode", boxMode)
+        p(c).edit().putString("extra", extra).putInt("boxMode", boxMode)
             .putInt("effortIdx", effortIdx).putInt("imgIdx", imgIdx).putBoolean("opaque", opaque)
-            .putInt("method", method).putInt("ocrScript", ocrScript).apply()
+            .putInt("method", method).putString("srcLang", src).putString("dstLang", dst).apply()
     }
 
     fun load(c: Context): Cfg {
@@ -76,13 +79,14 @@ object Store {
             else -> null                                // 1 = don't send
         }
         val imgW = intArrayOf(800, 1024, 1280)[imgIdx(c).coerceIn(0, 2)]
+        val src = srcLang(c)
+        val dst = dstLang(c)
         return Cfg(
-            pr.url, pr.key, pr.model,
-            s.getString("lang", "Persian")!!,
+            pr.url, pr.key, pr.model, Langs.enName(dst),
             s.getString("extra", "")!!,
             s.getInt("boxMode", 0),
             effort, imgW, opaque(c),
-            methodIdx(c).coerceIn(0, 2), ocrIdx(c).coerceIn(0, 3)
+            methodIdx(c).coerceIn(0, 2), Langs.ocrScript(src), src, dst
         )
     }
 }
