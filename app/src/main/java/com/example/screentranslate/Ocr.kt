@@ -11,7 +11,11 @@ import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import java.util.concurrent.CountDownLatch
 
 /** One recognised text block; box coordinates are fractions (0..1) of the screenshot. */
-data class OcrBlock(val text: String, val l: Float, val t: Float, val r: Float, val b: Float)
+data class OcrBlock(
+    val text: String,
+    val l: Float, val t: Float, val r: Float, val b: Float,
+    val lineH: Float = 0f   // average height of one line, fraction of screen height
+)
 
 /** On-device OCR (ML Kit, models bundled in the APK). */
 object Ocr {
@@ -46,10 +50,13 @@ object Ocr {
             val s = b.lines.joinToString(" ") { it.text }.trim()
             val box = b.boundingBox ?: continue
             if (s.none { it.isLetter() }) continue          // skip pure numbers / symbols
+            val heights = b.lines.mapNotNull { it.boundingBox?.height() }
+            val lh = (if (heights.isEmpty()) box.height().toFloat() else heights.average().toFloat()) / h
             out.add(OcrBlock(
                 s,
                 (box.left / w).coerceIn(0f, 1f), (box.top / h).coerceIn(0f, 1f),
-                (box.right / w).coerceIn(0f, 1f), (box.bottom / h).coerceIn(0f, 1f)
+                (box.right / w).coerceIn(0f, 1f), (box.bottom / h).coerceIn(0f, 1f),
+                lh
             ))
             if (out.size >= 60) break
         }

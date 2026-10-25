@@ -16,7 +16,8 @@ import kotlin.math.min
 data class Item(
     val text: String,
     val l: Float, val t: Float, val r: Float, val b: Float,
-    val color: Int = 0
+    val color: Int = 0,
+    val lineH: Float = 0f   // height of one text line of the ORIGINAL text, as a fraction of screen height
 )
 
 /** Splits a streamed reply into complete lines. */
@@ -79,7 +80,9 @@ object Overlay {
         val l = min(q[0], q[2]); val r = max(q[0], q[2])
         val t = min(q[1], q[3]); val bt = max(q[1], q[3])
         if (r - l < 0.005f || bt - t < 0.005f) return null
-        return Item(text, l, t, r, bt)
+        // one-line labels: the box is the line; taller boxes are paragraphs, assume a typical line height
+        val boxH = bt - t
+        return Item(text, l, t, r, bt, lineH = if (boxH <= 0.045f) boxH else 0.03f)
     }
 
     /** Average colour under the original text, used as the label background. */
@@ -97,7 +100,10 @@ object Overlay {
     }
 }
 
-/** Full-screen view that paints each translation over the original text. Items can be added while visible. */
+/**
+ * Full-screen view that paints each translation over the original text:
+ * solid black label, white text, font size matched to the original text. Items can be added while visible.
+ */
 class TranslationView(ctx: Context, private val opaque: Boolean) : View(ctx) {
     private val items = ArrayList<Item>()
     private val bg = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -105,9 +111,9 @@ class TranslationView(ctx: Context, private val opaque: Boolean) : View(ctx) {
 
     fun add(item: Item) { items.add(item); invalidate() }
 
-    private fun layout(text: String, size: Float, w: Int, color: Int): StaticLayout {
+    private fun layout(text: String, size: Float, w: Int): StaticLayout {
         tp.textSize = size
-        tp.color = color
+        tp.color = Color.WHITE
         return StaticLayout.Builder.obtain(text, 0, text.length, tp, w)
             .setAlignment(Layout.Alignment.ALIGN_CENTER).build()
     }
@@ -117,34 +123,28 @@ class TranslationView(ctx: Context, private val opaque: Boolean) : View(ctx) {
         val w = width.toFloat()
         val h = height.toFloat()
         val pad = 4f * d
-        val ex = 4f * d          // grow the label a bit so the original text is fully covered
-        val minSize = 8f * d
-        val maxSize = 22f * d
+        val ex = 3f * d          // grow the label a bit so the original text is fully covered
+        bg.color = Color.argb(if (opaque) 255 else 210, 0, 0, 0)
         for (item in items) {
-            val l = item.l * w - ex
+            val bw = max((item.r - item.l) * w + 2 * ex, 40f * d)
+            val bh = max((item.b - item.t) * h + ex, 12f * d)
+            val l = (item.l * w - ex).coerceIn(0f, max(0f, w - bw))
             val t = item.t * h - ex / 2
-            val bw = max((item.r - item.l) * w + 2 * ex, 48f * d)
-            val bh = max((item.b - item.t) * h + ex, 14f * d)
             val textW = max((bw - 2 * pad).toInt(), 24)
 
-            // push the background towards dark/light for stronger contrast with the text
-            val sr = Color.red(item.color); val sg = Color.green(item.color); val sb = Color.blue(item.color)
-            val lum = 0.299 * sr + 0.587 * sg + 0.114 * sb
-            val dark = lum <= 140
-            val fg = if (dark) Color.WHITE else Color.BLACK
-            val br: Int; val bgc: Int; val bb: Int
-            if (dark) { br = (sr * 0.6f).toInt(); bgc = (sg * 0.6f).toInt(); bb = (sb * 0.6f).toInt() }
-            else { br = (sr + (255 - sr) * 0.4f).toInt(); bgc = (sg + (255 - sg) * 0.4f).toInt(); bb = (sb + (255 - sb) * 0.4f).toInt() }
-
-            var size = (bh * 0.7f).coerceIn(minSize, maxSize)
-            var lay = layout(item.text, size, textW, fg)
+            // start from the size of the original text, shrink at most to 70% to fit the box
+            val lineH = if (item.lineH > 0f) item.lineH * h else bh
+            val startSize = (lineH * 0.95f).coerceIn(10f * d, 40f * d)
+            val minSize = max(startSize * 0.7f, 9f * d).coerceAtMost(startSize)
+            var size = startSize
+            var lay = layout(item.text, size, textW)
             while (lay.height > bh - pad && size > minSize) {
-                size -= 1.5f * d
-                lay = layout(item.text, size, textW, fg)
+                size -= 1f * d
+                lay = layout(item.text, size, textW)
             }
+            // still too tall: let the label grow downwards instead of making the text tiny
             val hh = max(bh, lay.height + pad)
-            bg.color = Color.argb(if (opaque) 255 else 235, br, bgc, bb)
-            c.drawRoundRect(l, t, l + bw, t + hh, 6f * d, 6f * d, bg)
+            c.drawRoundRect(l, t, l + bw, t + hh, 4f * d, 4f * d, bg)
             c.save()
             c.translate(l + pad, t + (hh - lay.height) / 2f)
             lay.draw(c)

@@ -338,8 +338,7 @@ class OverlayService : Service() {
             if (t.isEmpty()) return
             val b = blocks.getOrNull(idx - 1) ?: return
             count.incrementAndGet()
-            val base = Item(t, b.l, b.t, b.r, b.b)
-            val item = base.copy(color = Overlay.sample(bmp, base))
+            val item = Item(t, b.l, b.t, b.r, b.b, lineH = b.lineH)
             main.post { if (g == gen) addItem(item, cfg.opaque) }
         }
 
@@ -361,8 +360,7 @@ class OverlayService : Service() {
             ) { idx, text ->
                 val b = blocks[idx]
                 count.incrementAndGet()
-                val base = Item(text, b.l, b.t, b.r, b.b)
-                val item = base.copy(color = Overlay.sample(bmp, base))
+                val item = Item(text, b.l, b.t, b.r, b.b, lineH = b.lineH)
                 main.post { if (g == gen) addItem(item, cfg.opaque) }
             }
             Result.success("")
@@ -390,8 +388,7 @@ class OverlayService : Service() {
         fun handle(line: String) {
             val item = Overlay.parseBoxLine(line, cfg.boxMode, sw, sh) ?: return
             count.incrementAndGet()
-            val colored = item.copy(color = Overlay.sample(bmp, item))
-            main.post { if (g == gen) addItem(colored, cfg.opaque) }
+            main.post { if (g == gen) addItem(item, cfg.opaque) }
         }
 
         val r = Api.translate(cfg, b64, sw, sh, { g != gen }) { delta ->
