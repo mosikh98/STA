@@ -214,7 +214,6 @@ class OverlayService : Service() {
         main.removeCallbacks(timeout)
         fab?.visibility = View.VISIBLE
         fab?.text = "ترجمه"
-        pendingSources = null
         removeOverlay(); hidePanel()
     }
 
@@ -320,7 +319,6 @@ class OverlayService : Service() {
         }
         if (g != gen) return null
         if (blocks.isEmpty()) { finish(g, cfg, Result.success(""), 0); return null }
-        pendingSources = blocks.map { RectF(it.l, it.t, it.r, it.b) }
         return blocks
     }
 
@@ -410,23 +408,20 @@ class OverlayService : Service() {
 
     // ---------------------------------------------------------------- drawing
 
-    // one small overlay window per label (see LabelLayouter for the geometry)
+    // one small overlay window per label, exactly on top of the original text (see LabelLayouter)
     private var layouter: LabelLayouter? = null
     private val labelViews = ArrayList<LabelView?>()
-    private val dismissed = HashSet<Int>()
-    @Volatile private var pendingSources: List<RectF>? = null
-
-    private fun makeLayouter(cfg: Cfg): LabelLayouter {
-        val dm = realMetrics()
-        val lt = LabelLayouter(dm.widthPixels, dm.heightPixels, resources.displayMetrics.density, Langs.isRtl(cfg.dst), cfg.fontScale)
-        pendingSources?.let { lt.setSources(it) }
-        return lt
-    }
 
     private fun addItem(item: Item, cfg: Cfg) {
-        val lt = layouter ?: makeLayouter(cfg).also { layouter = it }
-        if (!lt.add(item)) return
-        for ((i, p) in lt.placeAll()) showLabel(i, p, cfg.opaque)
+        val lt = layouter ?: run {
+            val dm = realMetrics()
+            LabelLayouter(
+                dm.widthPixels, dm.heightPixels, resources.displayMetrics.density,
+                Langs.isRtl(cfg.dst), cfg.fontScale
+            ).also { layouter = it }
+        }
+        val p = lt.place(item) ?: return
+        showLabel(p, cfg.opaque)
     }
 
     /**
@@ -451,28 +446,18 @@ class OverlayService : Service() {
         }
     }
 
-    private fun showLabel(i: Int, p: Placement, opaque: Boolean) {
-        if (i in dismissed) return
-        val lp = labelParams(p.rect, opaque)
-        while (labelViews.size <= i) labelViews.add(null)
-        val existing = labelViews[i]
-        if (existing == null) {
-            val v = LabelView(this, p, opaque)
-            v.setOnClickListener { dismissLabel(i) }
-            wm.addView(v, lp)
-            labelViews[i] = v
-            if (labelViews.count { it != null } == 1) bringFabToFront()
-        } else {
-            existing.placement = p
-            existing.invalidate()
-            wm.updateViewLayout(existing, lp)
-        }
+    private fun showLabel(p: Placement, opaque: Boolean) {
+        val i = labelViews.size
+        val v = LabelView(this, p, opaque)
+        v.setOnClickListener { dismissLabel(i) }
+        wm.addView(v, labelParams(p.rect, opaque))
+        labelViews.add(v)
+        if (labelViews.size == 1) bringFabToFront()
     }
 
     private fun dismissLabel(i: Int) {
         labelViews.getOrNull(i)?.let { runCatching { wm.removeView(it) } }
         if (i < labelViews.size) labelViews[i] = null
-        dismissed.add(i)
     }
 
     private fun bringFabToFront() {
@@ -484,7 +469,6 @@ class OverlayService : Service() {
     private fun removeOverlay() {
         for (v in labelViews) v?.let { runCatching { wm.removeView(it) } }
         labelViews.clear()
-        dismissed.clear()
         layouter = null
     }
 

@@ -29,4 +29,4 @@ translated text drawn over the original text (like Google Translate's screen ove
 Translation type first; only that type's options are shown. Input/output languages are picked from lists; offline language models are downloaded/deleted from the in-app language manager.
 
 ## Label rendering
-Each translation is its own small overlay window (solid black, white text). Geometry lives in LabelLayouter (Overlay.kt): top/center anchored, widens only into free space, font starts at the original text size.
+Each translation is its own small overlay window (solid black, white text). Geometry lives in LabelLayouter (Overlay.kt): the label is exactly the OCR box of the original text; the translation is fitted inside it (font starts at the original size and shrinks to fit).
