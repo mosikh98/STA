@@ -16,7 +16,8 @@ data class Cfg(
     val method: Int = 1,         // 0 = vision model, 1 = on-phone OCR + API text translation, 2 = fully offline
     val ocrScript: Int = 0,      // derived from the input language
     val src: String = "auto",    // input language code or "auto"
-    val dst: String = "fa"       // output language code
+    val dst: String = "fa",      // output language code
+    val fontScale: Float = 1f    // size of the translated text relative to the original
 )
 
 /** Per-provider settings: Gemini keeps its own key/model, Custom keeps its own URL/key/model. */
@@ -36,6 +37,7 @@ object Store {
     fun imgIdx(c: Context) = p(c).getInt("imgIdx", 1)
     fun opaque(c: Context) = p(c).getBoolean("opaque", true)
     fun methodIdx(c: Context) = p(c).getInt("method", 1)
+    fun fontIdx(c: Context) = p(c).getInt("fontIdx", 1)
     fun srcLang(c: Context) = p(c).getString("srcLang", "auto")!!
     fun dstLang(c: Context) = p(c).getString("dstLang", "fa")!!
 
@@ -60,11 +62,11 @@ object Store {
 
     fun saveShared(
         c: Context, extra: String, boxMode: Int, effortIdx: Int, imgIdx: Int, opaque: Boolean,
-        method: Int, src: String, dst: String
+        method: Int, src: String, dst: String, fontIdx: Int
     ) {
         p(c).edit().putString("extra", extra).putInt("boxMode", boxMode)
             .putInt("effortIdx", effortIdx).putInt("imgIdx", imgIdx).putBoolean("opaque", opaque)
-            .putInt("method", method).putString("srcLang", src).putString("dstLang", dst).apply()
+            .putInt("method", method).putString("srcLang", src).putString("dstLang", dst).putInt("fontIdx", fontIdx).apply()
     }
 
     fun load(c: Context): Cfg {
@@ -86,7 +88,8 @@ object Store {
             s.getString("extra", "")!!,
             s.getInt("boxMode", 0),
             effort, imgW, opaque(c),
-            methodIdx(c).coerceIn(0, 2), Langs.ocrScript(src), src, dst
+            methodIdx(c).coerceIn(0, 2), Langs.ocrScript(src), src, dst,
+            floatArrayOf(0.85f, 1f, 1.15f, 1.3f)[fontIdx(c).coerceIn(0, 3)]
         )
     }
 }

@@ -34,6 +34,7 @@ class MainActivity : Activity() {
     private lateinit var mode: Spinner
     private lateinit var effortSp: Spinner
     private lateinit var imgSp: Spinner
+    private lateinit var fontSp: Spinner
     private lateinit var opaqueCb: CheckBox
     private lateinit var testBtn: Button
     private lateinit var status: TextView
@@ -145,13 +146,20 @@ class MainActivity : Activity() {
         extra = field(secLlm, "دستورالعمل اضافی (اختیاری)", shared.extra, ltr = false, multi = true)
 
         // ---- look (all methods) ----
+        root.addView(lbl("اندازه متن ترجمه نسبت به متن اصلی"))
+        fontSp = spinner(
+            listOf("کوچک‌تر (۸۵٪)", "هم‌اندازه (۱۰۰٪)", "بزرگ‌تر (۱۱۵٪)", "خیلی بزرگ‌تر (۱۳۰٪)"),
+            Store.fontIdx(this).coerceIn(0, 3)
+        )
+        root.addView(fontSp)
+
         opaqueCb = CheckBox(this).apply {
-            text = "برچسب‌های مات و پررنگ (متن زیرشان دیده نشود)"
+            text = "برچسب‌های کاملاً مات و مشکی (متن زیرشان دیده نشود)"
             isChecked = Store.opaque(this@MainActivity)
         }
         root.addView(opaqueCb)
         root.addView(TextView(this).apply {
-            text = "نکته: در اندروید ۱۲ به بالا، تا وقتی ترجمه مات روی صفحه است لمس بازی زیرش کار نمی‌کند؛ با منوی «پاک کردن ترجمه» برش دارید."
+            text = "هر برچسب یک پنجره کوچک است: لمس بیرون از برچسب‌ها به برنامه زیر می‌رسد و لمس خود برچسب، همان را برمی‌دارد. اگر این تیک خاموش باشد، لمس از برچسب‌ها هم رد می‌شود ولی اندروید ۱۲+ آن‌ها را حدود ۸۰٪ شفاف می‌کند."
             textSize = 12f
         })
 
@@ -330,7 +338,7 @@ class MainActivity : Activity() {
         Store.saveShared(
             this, extra.text.toString().trim(), mode.selectedItemPosition,
             effortSp.selectedItemPosition, imgSp.selectedItemPosition, opaqueCb.isChecked,
-            method, srcCode, dstCode
+            method, srcCode, dstCode, fontSp.selectedItemPosition
         )
     }
 

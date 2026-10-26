@@ -31,6 +31,8 @@ object Langs {
     fun label(code: String): String =
         if (code == "auto") "تشخیص خودکار (Auto)" else find(code).let { "${it.fa} — ${it.en}" }
 
+    fun isRtl(code: String): Boolean = code in setOf("fa", "ar", "he", "ur")
+
     /** English name, used inside prompts. */
     fun enName(code: String): String = find(code).en
 

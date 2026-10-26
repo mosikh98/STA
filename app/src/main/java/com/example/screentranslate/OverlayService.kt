@@ -7,6 +7,7 @@ import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.RectF
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.Icon
 import android.hardware.display.DisplayManager
@@ -32,6 +33,7 @@ import android.widget.Toast
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.abs
+import kotlin.math.ceil
 import kotlin.math.min
 
 class OverlayService : Service() {
@@ -49,7 +51,6 @@ class OverlayService : Service() {
     private var menu: View? = null
     private var panel: View? = null
     private var panelText: TextView? = null
-    private var overlay: View? = null
     private var pending = false
     private var busy = false
     /** Bumped whenever a translation is cancelled / replaced; stale results are dropped. */
@@ -213,6 +214,7 @@ class OverlayService : Service() {
         main.removeCallbacks(timeout)
         fab?.visibility = View.VISIBLE
         fab?.text = "ترجمه"
+        pendingSources = null
         removeOverlay(); hidePanel()
     }
 
@@ -291,6 +293,7 @@ class OverlayService : Service() {
             if (g != gen) return@post
             busy = false
             fab?.text = "ترجمه"
+            if (labelViews.any { it != null }) bringFabToFront()
             val err = r.exceptionOrNull()
             val full = r.getOrNull().orEmpty()
             when {
@@ -317,6 +320,7 @@ class OverlayService : Service() {
         }
         if (g != gen) return null
         if (blocks.isEmpty()) { finish(g, cfg, Result.success(""), 0); return null }
+        pendingSources = blocks.map { RectF(it.l, it.t, it.r, it.b) }
         return blocks
     }
 
@@ -339,7 +343,7 @@ class OverlayService : Service() {
             val b = blocks.getOrNull(idx - 1) ?: return
             count.incrementAndGet()
             val item = Item(t, b.l, b.t, b.r, b.b, lineH = b.lineH)
-            main.post { if (g == gen) addItem(item, cfg.opaque) }
+            main.post { if (g == gen) addItem(item, cfg) }
         }
 
         val r = Api.translateText(cfg, numbered.toString(), { g != gen }) { delta ->
@@ -361,7 +365,7 @@ class OverlayService : Service() {
                 val b = blocks[idx]
                 count.incrementAndGet()
                 val item = Item(text, b.l, b.t, b.r, b.b, lineH = b.lineH)
-                main.post { if (g == gen) addItem(item, cfg.opaque) }
+                main.post { if (g == gen) addItem(item, cfg) }
             }
             Result.success("")
         } catch (e: Throwable) {
@@ -388,7 +392,7 @@ class OverlayService : Service() {
         fun handle(line: String) {
             val item = Overlay.parseBoxLine(line, cfg.boxMode, sw, sh) ?: return
             count.incrementAndGet()
-            main.post { if (g == gen) addItem(item, cfg.opaque) }
+            main.post { if (g == gen) addItem(item, cfg) }
         }
 
         val r = Api.translate(cfg, b64, sw, sh, { g != gen }) { delta ->
@@ -406,39 +410,82 @@ class OverlayService : Service() {
 
     // ---------------------------------------------------------------- drawing
 
-    private fun addItem(item: Item, opaque: Boolean) {
-        var v = overlay as? TranslationView
-        if (v == null) v = createOverlay(opaque)
-        v.add(item)
+    // one small overlay window per label (see LabelLayouter for the geometry)
+    private var layouter: LabelLayouter? = null
+    private val labelViews = ArrayList<LabelView?>()
+    private val dismissed = HashSet<Int>()
+    @Volatile private var pendingSources: List<RectF>? = null
+
+    private fun makeLayouter(cfg: Cfg): LabelLayouter {
+        val dm = realMetrics()
+        val lt = LabelLayouter(dm.widthPixels, dm.heightPixels, resources.displayMetrics.density, Langs.isRtl(cfg.dst), cfg.fontScale)
+        pendingSources?.let { lt.setSources(it) }
+        return lt
     }
 
-    /** Full-screen layer that paints translations over the original text. Touches pass through where allowed. */
-    private fun createOverlay(opaque: Boolean): TranslationView {
-        removeOverlay()
-        val dm = realMetrics()
-        val v = TranslationView(this, opaque)
-        val lp = overlayParams(
-            dm.widthPixels, dm.heightPixels,
-            WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+    private fun addItem(item: Item, cfg: Cfg) {
+        val lt = layouter ?: makeLayouter(cfg).also { layouter = it }
+        if (!lt.add(item)) return
+        for ((i, p) in lt.placeAll()) showLabel(i, p, cfg.opaque)
+    }
+
+    /**
+     * Window flags: a window that is FLAG_NOT_TOUCHABLE gets its alpha capped to 0.8 by Android 12+
+     * (that was why the black labels looked grey). Solid labels are therefore touchable windows that
+     * only cover their own rectangle; touches anywhere else still reach the app underneath.
+     */
+    private fun labelParams(r: RectF, opaque: Boolean): WindowManager.LayoutParams {
+        val flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or   // x/y are real screen coordinates
+            (if (opaque) 0 else WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE)
+        return WindowManager.LayoutParams(
+            ceil(r.width()).toInt(), ceil(r.height()).toInt(),
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, flags, PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            // Android 12+ only lets touches pass through overlays with alpha <= 0.8
-            alpha = if (opaque) 1.0f else 0.8f
+            x = r.left.toInt(); y = r.top.toInt()
             if (Build.VERSION.SDK_INT >= 28)
                 layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
         }
-        wm.addView(v, lp)
-        overlay = v
-        fab?.let { f ->
-            wm.removeView(f)          // re-add so the button stays above the translation
-            wm.addView(f, fabLp)
+    }
+
+    private fun showLabel(i: Int, p: Placement, opaque: Boolean) {
+        if (i in dismissed) return
+        val lp = labelParams(p.rect, opaque)
+        while (labelViews.size <= i) labelViews.add(null)
+        val existing = labelViews[i]
+        if (existing == null) {
+            val v = LabelView(this, p, opaque)
+            v.setOnClickListener { dismissLabel(i) }
+            wm.addView(v, lp)
+            labelViews[i] = v
+            if (labelViews.count { it != null } == 1) bringFabToFront()
+        } else {
+            existing.placement = p
+            existing.invalidate()
+            wm.updateViewLayout(existing, lp)
         }
-        return v
+    }
+
+    private fun dismissLabel(i: Int) {
+        labelViews.getOrNull(i)?.let { runCatching { wm.removeView(it) } }
+        if (i < labelViews.size) labelViews[i] = null
+        dismissed.add(i)
+    }
+
+    private fun bringFabToFront() {
+        val f = fab ?: return
+        val lp = fabLp ?: return
+        runCatching { wm.removeView(f); wm.addView(f, lp) }
     }
 
     private fun removeOverlay() {
-        overlay?.let { runCatching { wm.removeView(it) } }
-        overlay = null
+        for (v in labelViews) v?.let { runCatching { wm.removeView(it) } }
+        labelViews.clear()
+        dismissed.clear()
+        layouter = null
     }
 
     private fun updatePanel(text: String) {
